@@ -284,6 +284,24 @@ async function loadNetWorthHistory() {
   } catch(e) { console.warn("歷史載入失敗:", e.message); return false; }
 }
 
+// 手動排版結構（拖曳決定的橫排/直排）存回雲端
+async function saveCategoryLayout(cat) {
+  if (!cloudOn()) return;
+  try { await sb.from("category_layout").upsert({ cat, rows: categoryLayout[cat] || [] }); }
+  catch(e) { console.warn("版面儲存失敗:", e.message); }
+}
+
+// 讀取所有類別的手動排版結構
+async function loadCategoryLayouts() {
+  if (!cloudOn()) return false;
+  try {
+    const { data, error } = await sb.from("category_layout").select("cat,rows");
+    if (error) throw error;
+    if (data) { data.forEach(r => { categoryLayout[r.cat] = r.rows || []; }); }
+    return true;
+  } catch(e) { console.warn("版面載入失敗:", e.message); return false; }
+}
+
 const nf = n => Math.round(n).toLocaleString();
 const valueOf = a => a.cat === "cash" ? a.balance : a.qty * a.price;
 const netWorth = () => assets.reduce((s,a)=>s+valueOf(a),0);
@@ -341,8 +359,60 @@ function buildDisplayItems() {
   return { big, small, nw };
 }
 
+// ── 手動列陣佈局（取代單純依數值的 squarified，讓拖曳能決定橫排/直排）──
+// categoryLayout[cat] = [[assetId,...], [assetId,...], ...]：一個 array 代表一「列」，
+// 列內的資產左右並排（橫排），列與列之間上下堆疊（直排）。
+// 面積仍照數值比例分配：列高 ∝ 該列數值總和，列內每項寬度 ∝ 該項數值 / 該列總和。
+let categoryLayout = {};
+
+function layoutRows(rows, x, y, w, h) {
+  const rowAssetsList = rows.map(row => row.map(id => assets.find(a=>a.id===id)).filter(Boolean));
+  const totalValue = rowAssetsList.reduce((s,list)=>s+list.reduce((s2,a)=>s2+valueOf(a),0),0);
+  if (totalValue<=0) return [];
+  const nodes = [];
+  let curY = y;
+  rowAssetsList.forEach(rowAssets => {
+    const rowValue = rowAssets.reduce((s,a)=>s+valueOf(a),0);
+    if (rowValue<=0) return;
+    const rowH = h * (rowValue/totalValue);
+    let curX = x;
+    rowAssets.forEach(a => {
+      const v = valueOf(a);
+      const itemW = w * (v/rowValue);
+      nodes.push({ id:a.id, value:v, ref:a, x:curX, y:curY, w:itemW, h:rowH });
+      curX += itemW;
+    });
+    curY += rowH;
+  });
+  return nodes;
+}
+
+// 讓某類別的 rows 結構跟目前該類別實際顯示的資產同步（新增的資產自動補成新的一列、
+// 刪除或被併入「其他」的資產自動移除）。回傳是否有結構變動（供決定要不要存回雲端）。
+function ensureCategoryLayout(cat, ids) {
+  if (!categoryLayout[cat]) categoryLayout[cat] = [];
+  const rows = categoryLayout[cat];
+  let changed = false;
+  for (let i=rows.length-1; i>=0; i--) {
+    const filtered = rows[i].filter(id => ids.includes(id));
+    if (filtered.length !== rows[i].length) { rows[i]=filtered; changed=true; }
+    if (rows[i].length===0) { rows.splice(i,1); changed=true; }
+  }
+  const present = new Set(rows.flat());
+  ids.forEach(id => { if (!present.has(id)) { rows.push([id]); present.add(id); changed=true; } });
+  return changed;
+}
+
+function healCategoryLayouts(bigList) {
+  GROUP_ORDER.forEach(cat => {
+    const idsForCat = bigList.filter(a=>a.cat===cat).map(a=>a.id);
+    if (ensureCategoryLayout(cat, idsForCat)) saveCategoryLayout(cat);
+  });
+}
+
 function layoutGrouped(w, h) {
   const { big, small } = buildDisplayItems();
+  healCategoryLayouts(big);
   // 分群：各 cat 一區，額外一個 "其他" 區（若有 small）
   const groups = [];
   GROUP_ORDER.forEach(cat => {
@@ -361,12 +431,8 @@ function layoutGrouped(w, h) {
       all.push({ id:"__other__", value:gn.value, ref:{ id:"__other__", name:"其他", color:OTHER_COLOR, isOther:true, members:gn.list },
         x:gn.x, y:gn.y, w:gn.w, h:gn.h });
     } else {
-      // 群組層不加 padding，直接在群組矩形內排 tile
-      // 依使用者拖曳排序的 order 欄位排列（而非單純依數值大小），preserveOrder=true 讓 layoutTreemap 不覆蓋順序
-      const sortedList = [...gn.list].sort((a,b)=>(a.order??0)-(b.order??0));
-      const inner=layoutTreemap(
-        sortedList.map(a=>({id:a.id,value:valueOf(a),ref:a})),
-        gn.x, gn.y, gn.w, gn.h, true);
+      // 群組層不加 padding，直接依使用者手動排列的 rows 結構佈局
+      const inner = layoutRows(categoryLayout[gn.key] || [], gn.x, gn.y, gn.w, gn.h);
       all=all.concat(inner);
     }
   });
@@ -468,8 +534,8 @@ function attachTileInteraction(el, assetRef) {
   let timer = null;
   let dragActive = false;
   let startX=0, startY=0, startLeft=0, startTop=0;
-  let lastHoverId = null;
-  let movedAssets = new Set(); // 這次拖曳中被交換過順序、需要存回雲端的資產
+  let lastIntentKey = null;
+  let layoutTouched = false; // 這次拖曳是否真的改動了版面結構（決定要不要存雲端）
 
   function cleanup() {
     clearTimeout(timer); timer=null;
@@ -478,7 +544,28 @@ function attachTileInteraction(el, assetRef) {
     el.classList.remove("dragging");
     el.style.zIndex = "";
     el.style.transition = "";
-    lastHoverId = null;
+    lastIntentKey = null;
+  }
+
+  // 把資產從目前列陣結構中移除，再依「意圖」插入：
+  // mode='row'：插進目標的同一排（橫排並列）；mode='newrow'：在目標排的上/下方插入新的一排（直排堆疊）
+  function applyIntent(cat, assetId, intent) {
+    const rows = categoryLayout[cat];
+    if (!rows) return;
+    for (let i=rows.length-1;i>=0;i--) {
+      const idx = rows[i].indexOf(assetId);
+      if (idx>=0) { rows[i].splice(idx,1); if (rows[i].length===0) rows.splice(i,1); break; }
+    }
+    let targetRow=-1, targetCol=-1;
+    for (let i=0;i<rows.length;i++){ const idx=rows[i].indexOf(intent.targetId); if(idx>=0){targetRow=i;targetCol=idx;break;} }
+    if (targetRow===-1) { rows.push([assetId]); return; }
+    if (intent.mode==="row") {
+      const insertAt = intent.before ? targetCol : targetCol+1;
+      rows[targetRow].splice(insertAt, 0, assetId);
+    } else {
+      const newRowIdx = intent.before ? targetRow : targetRow+1;
+      rows.splice(newRowIdx, 0, [assetId]);
+    }
   }
 
   function onPointerMove(e) {
@@ -505,17 +592,23 @@ function attachTileInteraction(el, assetRef) {
       n.id !== assetRef.id && n.ref && !n.ref.isOther && n.ref.cat === a.cat &&
       cx >= n.x && cx <= n.x+n.w && cy >= n.y && cy <= n.y+n.h
     );
-    if (hovered && hovered.id !== lastHoverId) {
-      const other = assets.find(x=>x.id===hovered.id);
-      if (other) {
-        const tmp = a.order ?? 0;
-        a.order = other.order ?? 0;
-        other.order = tmp;
-        movedAssets.add(a.id); movedAssets.add(other.id);
-        lastHoverId = hovered.id;
-        renderTreemap(); // 其他方塊依新順序平滑重新排列、讓位
-      }
-    }
+    if (!hovered) return;
+
+    // 判斷落點在目標方塊的哪個象限：離左右邊近 → 橫排插入同一排；離上下邊近 → 直排插入新的一排
+    const relX = (cx - hovered.x) / hovered.w;
+    const relY = (cy - hovered.y) / hovered.h;
+    const distX = Math.min(relX, 1-relX);
+    const distY = Math.min(relY, 1-relY);
+    const intent = distX < distY
+      ? { mode:"row",    targetId: hovered.id, before: relX < 0.5 }
+      : { mode:"newrow", targetId: hovered.id, before: relY < 0.5 };
+    const key = `${intent.mode}:${intent.targetId}:${intent.before}`;
+    if (key === lastIntentKey) return;
+    lastIntentKey = key;
+
+    applyIntent(a.cat, a.id, intent);
+    layoutTouched = true;
+    renderTreemap(); // 其他方塊依新結構平滑重新排列、讓位；拖曳中的方塊也會跟著變形（見 dragging 的 transition 設定）
   }
 
   function onPointerUp() {
@@ -530,14 +623,11 @@ function attachTileInteraction(el, assetRef) {
       return;
     }
 
+    const cat = assetRef.cat;
     cleanup();
-    renderTreemap(); // 放開後，讓拖曳方塊也平滑歸位到最終計算出的格子
-    // 把這次拖曳中順序有變動的資產存回雲端
-    movedAssets.forEach(id => {
-      const a2 = assets.find(x=>x.id===id);
-      if (a2) saveAssetToCloud(a2);
-    });
-    movedAssets = new Set();
+    renderTreemap(); // 放開後，讓拖曳方塊也平滑歸位到最終計算出的格子（含形狀）
+    if (layoutTouched) saveCategoryLayout(cat);
+    layoutTouched = false;
   }
 
   el.addEventListener("pointerdown", (e) => {
@@ -548,12 +638,14 @@ function attachTileInteraction(el, assetRef) {
     dragActive = false;
 
     timer = setTimeout(() => {
-      if (assetRef.isOther) return; // 「其他」聚合方塊沒有單一順序概念，不支援拖曳
+      if (assetRef.isOther) return; // 「其他」聚合方塊沒有單一位置概念，不支援拖曳
       dragActive = true;
       draggingId = assetRef.id;
       el.classList.add("dragging");
       el.style.zIndex = "40";
-      el.style.transition = "box-shadow .2s ease, transform .15s ease"; // 位置改用直接賦值，不做位移動畫，才能精準跟手指
+      // 位置(left/top)不放進 transition，才能精準跟著手指；
+      // 但把 width/height 放進去，讓拖曳中的方塊能隨著版面結構改變而平滑「變形」
+      el.style.transition = "width .22s ease, height .22s ease, box-shadow .2s ease, transform .15s ease";
     }, LONG_PRESS_MS);
 
     window.addEventListener("pointermove", onPointerMove, { passive:false });
@@ -1065,6 +1157,7 @@ async function boot() {
     if (cloudOn()) {
       if(status) status.textContent="從雲端載入中…";
       await withTimeout(loadFromCloud(), 8000, "資產載入");
+      await withTimeout(loadCategoryLayouts(), 8000, "版面載入");
       const gotHistory = await withTimeout(loadNetWorthHistory(), 8000, "歷史載入");
       // 雲端還沒有任何歷史點（例如第一次啟用同步）：補記目前這筆，讓折線圖有起點
       if (!gotHistory || history.length===0) {
