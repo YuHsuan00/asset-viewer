@@ -12,7 +12,870 @@
   html, body {
     background: #0b0c10; color: #e8eaed;
     font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", sans-serif;
+    overscroll-behavior: none;<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>資產檢視器</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    background: #0b0c10; color: #e8eaed;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", sans-serif;
     overscroll-behavior: none;
+  }
+  body { display: flex; justify-content: center; }
+  #app {
+    width: 100%; max-width: 393px; /* iPhone 16 邏輯寬度 */
+    min-height: 100vh; position: relative;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+  .wrap { padding: 0 16px; }               /* 左右安全邊距 */
+  .topbar {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding: 30px 16px 18px;
+  }
+  .eyebrow { font-size: 11px; letter-spacing: 3px; color: #6b7280; margin-bottom: 8px; }
+  .networth { font-size: 40px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
+  .subline { font-size: 12px; color: #5b616e; margin-top: 4px; }
+  .price-status-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .price-status { font-size: 11px; color: #5b616e; }
+  .refresh-btn { width: 24px; height: 24px; border-radius: 7px; border: 1px solid #23252e; background: #16181f; color: #8a94a6; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; }
+  .refresh-btn:active { background: #1c1e26; }
+  .refresh-btn.spinning svg { animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .addbtn {
+    width: 44px; height: 44px; border-radius: 50%; border: none;
+    background: #5b8def; color: #fff; font-size: 26px; font-weight: 300;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 14px rgba(91,141,239,.4); margin-top: 4px; flex-shrink: 0;
+  }
+  .addbtn:active { transform: scale(.92); }
+
+  #treemap { position: relative; width: 100%; height: 420px; padding: 0 8px; }
+  #treemap-inner { position: relative; width: 100%; height: 100%; }
+  .tile {
+    position: absolute; padding: 3.5px; cursor: pointer;
+    transition: left .55s cubic-bezier(.34,1.15,.4,1), top .55s cubic-bezier(.34,1.15,.4,1),
+                width .55s cubic-bezier(.34,1.15,.4,1), height .55s cubic-bezier(.34,1.15,.4,1);
+  }
+  .tile-inner {
+    width: 100%; height: 100%; border-radius: 14px;
+    display: flex; flex-direction: column; justify-content: space-between;
+    padding: 12px; overflow: hidden; transition: box-shadow .3s;
+  }
+  .tile-name { font-weight: 700; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.28);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile-pct { font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; text-shadow: 0 1px 3px rgba(0,0,0,.28); }
+  .tile-val { color: rgba(255,255,255,.85); font-variant-numeric: tabular-nums; }
+
+  .section-label { font-size: 11px; letter-spacing: 2px; color: #6b7280; margin: 4px 0 12px; }
+  .legend-group { margin-bottom: 16px; }
+  .legend-head { display: flex; justify-content: space-between; margin-bottom: 9px; }
+  .legend-head .g-name { font-size: 12px; color: #6b7280; letter-spacing: 1px; }
+  .legend-head .g-val { font-size: 12px; color: #8a94a6; font-variant-numeric: tabular-nums; }
+  .legend-items { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+  .legend-item { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+  .swatch { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+  .legend-item .li-name { font-size: 13px; color: #a7adb8; }
+  .legend-item .li-qty { font-size: 11px; color: #5b616e; }
+
+  /* 折線圖 */
+  .chart-card { margin: 8px 16px 0; padding: 18px 16px 12px; background: #101218; border-radius: 18px; border: 1px solid #1a1c23; }
+  .chart-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 14px; }
+  .chart-title { font-size: 13px; color: #a7adb8; font-weight: 600; }
+  .chart-range { font-size: 11px; color: #5b616e; }
+  #sparkline { width: 100%; height: 120px; display: block; }
+
+  /* 底部彈出面板 */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex;
+    align-items: flex-end; justify-content: center; z-index: 50; animation: fade .25s ease; }
+  .sheet {
+    width: 100%; max-width: 393px; background: #16181f; border-radius: 24px 24px 0 0;
+    padding: 10px 20px calc(30px + env(safe-area-inset-bottom));
+    animation: slideUp .32s cubic-bezier(.34,1.2,.4,1); max-height: 88vh; overflow-y: auto;
+  }
+  .grabber { width: 40px; height: 4px; background: #3a3d47; border-radius: 2px; margin: 0 auto 20px; }
+  .sheet-asset-head { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+  .sheet-asset-head .sa-name { font-size: 19px; font-weight: 700; }
+  .sheet-asset-head .sa-sub { font-size: 13px; color: #6b7280; }
+  .dir-row { display: flex; gap: 8px; margin-bottom: 16px; }
+  .seg-row { display: flex; gap: 6px; background: #101218; border-radius: 12px; padding: 4px; margin-bottom: 18px; }
+  .seg-btn { flex: 1; border: none; border-radius: 9px; padding: 10px 0; font-size: 14px; font-weight: 600; cursor: pointer; background: transparent; color: #6b7280; transition: all .15s; }
+  .seg-btn.on { background: #2a2d38; color: #fff; }
+  .dir-btn { flex: 1; border: none; border-radius: 11px; padding: 11px 0; font-size: 15px; font-weight: 700; cursor: pointer; background: #22242d; color: #6b7280; transition: all .15s; }
+  .dir-btn.add.on { background: #3fb07a; color: #fff; }
+  .dir-btn.sub.on { background: #e8804a; color: #fff; }
+  .big-input { width: 100%; background: #0e0f13; border-radius: 13px; padding: 15px 16px; color: #fff;
+    font-size: 24px; font-weight: 700; outline: none; font-variant-numeric: tabular-nums; }
+  .quick-row { display: flex; gap: 8px; margin: 14px 0 4px; }
+  .quick-btn { flex: 1; border: 1.5px solid #2a2d38; background: #1c1e26; color: #a7adb8; border-radius: 10px; padding: 9px 0; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .primary-btn { width: 100%; border: none; border-radius: 14px; padding: 16px 0; font-size: 17px; font-weight: 700; cursor: pointer; transition: all .15s; margin-top: 18px; }
+  .primary-btn:disabled { background: #23252e !important; color: #555b66 !important; cursor: not-allowed; }
+
+  .sheet-title { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+  .sheet-desc { font-size: 13px; color: #6b7280; margin-bottom: 20px; }
+  .cat-row { display: flex; gap: 8px; margin-bottom: 22px; }
+  .cat-btn { flex: 1; border: 1.5px solid #23252e; background: #1c1e26; color: #a7adb8; border-radius: 12px; padding: 14px 0; font-size: 14px; font-weight: 700; cursor: pointer; transition: all .15s; }
+  .field { margin-bottom: 14px; }
+  .field-label { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+  .sm-input { width: 100%; background: #0e0f13; border: 1.5px solid #2a2d38; border-radius: 11px; padding: 12px 14px; color: #fff; font-size: 16px; font-weight: 600; outline: none; font-variant-numeric: tabular-nums; }
+  .row2 { display: flex; gap: 10px; }
+  .note-sm { font-size: 11px; color: #5b616e; margin: 2px 0 8px; }
+  .expand-note { animation: fadeIn .3s ease; }
+  .del-btn { width: 100%; border: 1.5px solid #3a2020; background: transparent; color: #d9645a; border-radius: 12px; padding: 12px 0; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 10px; }
+
+  @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="topbar">
+    <div>
+      <div class="eyebrow">淨資產 TWD</div>
+      <div class="networth" id="networth">0</div>
+      <div class="subline" id="subline"></div>
+      <div class="price-status-row">
+        <span class="price-status" id="priceStatus">—</span>
+        <button class="refresh-btn" id="refreshBtn" title="更新即時價">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+        </button>
+      </div>
+    </div>
+    <button class="addbtn" id="addBtn">+</button>
+  </div>
+
+  <div id="treemap"><div id="treemap-inner"></div></div>
+
+  <div class="wrap">
+    <div class="section-label">組成</div>
+    <div id="legend"></div>
+  </div>
+
+  <div class="chart-card">
+    <div class="chart-head">
+      <span class="chart-title">資產變化</span>
+      <span class="chart-range" id="chartRange">近期</span>
+    </div>
+    <svg id="sparkline" viewBox="0 0 340 120" preserveAspectRatio="none"></svg>
+  </div>
+</div>
+
+<script>
+// ── 類別定義 ──
+const CATEGORIES = {
+  cash:   { label: "銀行帳戶", unit: "",   qtyLabel: "",       priceLabel: "",          palette: ["#00c368","#2ea56f","#3fb07a","#5fc98d","#1f8f5a","#12b886"] },
+  crypto: { label: "虛擬貨幣", unit: "顆", qtyLabel: "持有數量", priceLabel: "現價 (TWD/顆)", palette: ["#f7931a","#a879f0","#e8804a","#c05fd9","#f0a93c","#b98cf5"] },
+  stock:  { label: "股票",     unit: "股", qtyLabel: "持有股數", priceLabel: "股價 (TWD/股)", palette: ["#5b8def","#4a9fe0","#6c7ce0","#3f7fd4","#7aa5f0","#5ac0e0"] },
+};
+const GROUP_ORDER = ["cash","crypto","stock"];
+const OTHER_COLOR = "#4b515c";
+const THRESHOLD = 0.03; // 3% 以下併入「其他」
+
+// 幣種代號 → CoinGecko id（抓即時價用；新增幣種若不在表內會嘗試用小寫代號）
+const COINGECKO_IDS = {
+  BTC:"bitcoin", ETH:"ethereum", USDT:"tether", USDC:"usd-coin",
+  SOL:"solana", BNB:"binancecoin", XRP:"ripple", ADA:"cardano",
+  DOGE:"dogecoin", TRX:"tron", DOT:"polkadot", MATIC:"matic-network",
+  LINK:"chainlink", AVAX:"avalanche-2", SHIB:"shiba-inu", LTC:"litecoin",
+  UNI:"uniswap", ATOM:"cosmos", XLM:"stellar", NEAR:"near",
+  APT:"aptos", ARB:"arbitrum", OP:"optimism", PEPE:"pepe",
+  SUI:"sui", TON:"the-open-network", BCH:"bitcoin-cash"
+};
+
+let assets = [
+  { id:"line",  cat:"cash",   name:"Line Bank",  color:"#00c368", balance:250000 },
+  { id:"chang", cat:"cash",   name:"彰銀",       color:"#2ea56f", balance:132300 },
+  { id:"btc",   cat:"crypto", name:"比特幣",     color:"#f7931a", qty:0.04201, symbol:"BTC",  price:1996000 },
+  { id:"eth",   cat:"crypto", name:"以太幣",     color:"#a879f0", qty:0.1588,  symbol:"ETH",  price:56000 },
+  { id:"tw50",  cat:"stock",  name:"元大台灣50", color:"#5b8def", qty:175,     symbol:"0050", price:108 },
+];
+
+// 淨資產歷史（每次變動記一點）
+let history = [];
+
+// ─────────────────────────────────────────────────────────
+// Supabase 雲端同步設定
+// 回來後：在 supabase.com 建專案 → Settings → API 複製這兩個值貼進來
+// 兩個值都留空時 = 純本地模式（資料只存這個瀏覽器分頁，重整就沒了）
+// ─────────────────────────────────────────────────────────
+const SUPABASE_URL = "https://pxqgvscxapyovydofzlt.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB4cWd2c2N4YXB5b3Z5ZG9memx0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM3NjYxNzUsImV4cCI6MjA5OTM0MjE3NX0.oaIeXe3LmE-4sGG3Ntjsjv8bBN2j2XAIgx-FDwqASF0";
+
+let sb = null;
+const cloudOn = () => SUPABASE_URL && SUPABASE_ANON_KEY && sb;
+
+function initSupabase() {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return;
+  try { sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); }
+  catch(e) { console.warn("Supabase 初始化失敗:", e.message); }
+}
+
+// 從雲端載入資產（若有）
+async function loadFromCloud() {
+  if (!cloudOn()) return false;
+  try {
+    const { data, error } = await sb.from("assets").select("*").order("created_at",{ascending:true});
+    if (error) throw error;
+    if (data && data.length) {
+      assets = data.map(r => ({
+        id: r.id, cat: r.cat, name: r.name, color: r.color,
+        ...(r.cat==="cash" ? { balance: Number(r.balance)||0 }
+                           : { qty: Number(r.qty)||0, price: Number(r.price)||0, symbol: r.symbol||"" })
+      }));
+    }
+    return true;
+  } catch(e) { console.warn("雲端載入失敗:", e.message); return false; }
+}
+
+// 把單一資產寫回雲端（upsert）
+async function saveAssetToCloud(a) {
+  if (!cloudOn()) return;
+  try {
+    await sb.from("assets").upsert({
+      id: a.id, cat: a.cat, name: a.name, color: a.color,
+      balance: a.cat==="cash" ? a.balance : null,
+      qty: a.cat!=="cash" ? a.qty : null,
+      price: a.cat!=="cash" ? a.price : null,
+      symbol: a.symbol || null
+    });
+  } catch(e) { console.warn("雲端儲存失敗:", e.message); }
+}
+
+async function deleteAssetFromCloud(id) {
+  if (!cloudOn()) return;
+  try { await sb.from("assets").delete().eq("id", id); }
+  catch(e) { console.warn("雲端刪除失敗:", e.message); }
+}
+
+// 淨值歷史：存一筆快照到雲端（供折線圖跨裝置同步）
+async function saveNetWorthSnapshot(value) {
+  if (!cloudOn()) return;
+  try { await sb.from("net_worth_history").insert({ value }); }
+  catch(e) { console.warn("歷史快照儲存失敗:", e.message); }
+}
+
+// 讀最近的淨值歷史（供折線圖）
+async function loadNetWorthHistory() {
+  if (!cloudOn()) return false;
+  try {
+    const { data, error } = await sb.from("net_worth_history")
+      .select("value,created_at").order("created_at",{ascending:true}).limit(60);
+    if (error) throw error;
+    if (data && data.length) {
+      history = data.map(r => ({ v: Number(r.value), t: new Date(r.created_at).getTime() }));
+    }
+    return true;
+  } catch(e) { console.warn("歷史載入失敗:", e.message); return false; }
+}
+
+const nf = n => Math.round(n).toLocaleString();
+const valueOf = a => a.cat === "cash" ? a.balance : a.qty * a.price;
+const netWorth = () => assets.reduce((s,a)=>s+valueOf(a),0);
+
+// ── squarified treemap ──
+function layoutTreemap(items, x, y, w, h) {
+  const total = items.reduce((s,it)=>s+it.value,0);
+  if (total <= 0 || w <= 0 || h <= 0) return [];
+  const nodes = [];
+  let area = {x,y,w,h};
+  let remaining = [...items].sort((a,b)=>b.value-a.value);
+  let remTotal = total;
+  while (remaining.length) {
+    const horizontal = area.w >= area.h;
+    const side = horizontal ? area.h : area.w;
+    let row=[], rowVal=0, best=Infinity;
+    for (let i=0;i<remaining.length;i++){
+      const testVal = rowVal + remaining[i].value;
+      const rowArea = (testVal/remTotal)*area.w*area.h;
+      const rowLen = rowArea/side;
+      let worst=0;
+      [...row,remaining[i]].forEach(it=>{
+        const itLen=(it.value/testVal)*rowLen;
+        worst=Math.max(worst,Math.max(rowLen/itLen,itLen/rowLen));
+      });
+      if (worst<=best){best=worst;row=[...row,remaining[i]];rowVal=testVal;}
+      else break;
+    }
+    const rowArea=(rowVal/remTotal)*area.w*area.h;
+    const rowLen=rowArea/side;
+    let off=0;
+    row.forEach(it=>{
+      const itLen=(it.value/rowVal)*side;
+      if(horizontal) nodes.push({...it,x:area.x,y:area.y+off,w:rowLen,h:itLen});
+      else nodes.push({...it,x:area.x+off,y:area.y,w:itLen,h:rowLen});
+      off+=itLen;
+    });
+    if(horizontal){area.x+=rowLen;area.w-=rowLen;}
+    else{area.y+=rowLen;area.h-=rowLen;}
+    remTotal-=rowVal;
+    remaining=remaining.slice(row.length);
+  }
+  return nodes;
+}
+
+// 小於門檻的資產併成「其他」，再兩層分群佈局
+function buildDisplayItems() {
+  const nw = netWorth();
+  const big = [], small = [];
+  assets.forEach(a => {
+    if (valueOf(a)/nw < THRESHOLD) small.push(a);
+    else big.push(a);
+  });
+  return { big, small, nw };
+}
+
+function layoutGrouped(w, h) {
+  const { big, small } = buildDisplayItems();
+  // 分群：各 cat 一區，額外一個 "其他" 區（若有 small）
+  const groups = [];
+  GROUP_ORDER.forEach(cat => {
+    const list = big.filter(a=>a.cat===cat);
+    const value = list.reduce((s,a)=>s+valueOf(a),0);
+    if (value>0) groups.push({ key:cat, list, value, other:false });
+  });
+  const smallVal = small.reduce((s,a)=>s+valueOf(a),0);
+  if (smallVal>0) groups.push({ key:"__other__", list:small, value:smallVal, other:true });
+
+  const gNodes = layoutTreemap(groups.map(g=>({...g,value:g.value})), 0,0,w,h);
+  let all=[];
+  gNodes.forEach(gn=>{
+    if (gn.other) {
+      // 其他整區當成一塊（不加額外 padding，縫隙統一由 tile 的 gap 控制）
+      all.push({ id:"__other__", value:gn.value, ref:{ id:"__other__", name:"其他", color:OTHER_COLOR, isOther:true, members:gn.list },
+        x:gn.x, y:gn.y, w:gn.w, h:gn.h });
+    } else {
+      // 群組層不加 padding，直接在群組矩形內排 tile
+      const inner=layoutTreemap(
+        gn.list.map(a=>({id:a.id,value:valueOf(a),ref:a})),
+        gn.x, gn.y, gn.w, gn.h);
+      all=all.concat(inner);
+    }
+  });
+  return all;
+}
+
+// ── 渲染 treemap ──
+let animatedNW = netWorth();
+function renderTreemap() {
+  const inner = document.getElementById("treemap-inner");
+  const rect = inner.getBoundingClientRect();
+  const W = rect.width, H = rect.height;
+  const nodes = layoutGrouped(W, H);
+  const nw = netWorth();
+  const existing = {};
+  inner.querySelectorAll(".tile").forEach(el => existing[el.dataset.id] = el);
+  const seen = new Set();
+
+  nodes.forEach(n => {
+    const a = n.ref;
+    seen.add(n.id);
+    const pct = (n.value/nw)*100;
+
+    // 依方塊大小分級，優先保留「數字」(比例最重要)，空間不夠才砍名稱：
+    // L3 大：名稱 + 比例 + 金額
+    // L2 中：比例 + 金額（無名稱）
+    // L1 小：只有比例
+    // L0 極小：只有比例(縮到最小)
+    const level =
+      (n.w>=88 && n.h>=62) ? 3 :
+      (n.w>=56 && n.h>=42) ? 2 :
+      (n.w>=40 && n.h>=26) ? 1 : 0;
+
+    let el = existing[n.id];
+    if (!el) {
+      el = document.createElement("div");
+      el.className="tile"; el.dataset.id=n.id;
+      el.innerHTML = `<div class="tile-inner"><div class="tile-name"></div><div class="tile-bottom"><div class="tile-pct"></div><div class="tile-val"></div></div></div>`;
+      el.addEventListener("click", ()=> a.isOther ? openOtherSheet(a) : openAdjust(a.id));
+      inner.appendChild(el);
+    }
+    el.style.left=n.x+"px"; el.style.top=n.y+"px"; el.style.width=n.w+"px"; el.style.height=n.h+"px";
+
+    const innerEl = el.querySelector(".tile-inner");
+    innerEl.style.background = a.isOther ? "#22252d" : `linear-gradient(145deg, ${a.color}, ${a.color}c4)`;
+    innerEl.style.boxShadow = `0 3px 14px ${a.color}2e`;
+    innerEl.style.padding = level<=1 ? "6px 7px" : "11px 12px";
+    innerEl.style.justifyContent = level>=3 ? "space-between" : "center";
+
+    const nameEl=el.querySelector(".tile-name");
+    const bottom=el.querySelector(".tile-bottom");
+    const pctEl=el.querySelector(".tile-pct");
+    const valEl=el.querySelector(".tile-val");
+
+    // 名稱只在 L3 顯示（其他等級砍掉，優先留數字）
+    // 「其他」方塊字級縮小，避免被裁
+    if (level>=3) {
+      nameEl.style.display="block";
+      nameEl.textContent = a.name;
+      nameEl.style.fontSize = (a.isOther?13:16)+"px";
+      nameEl.style.lineHeight = "1.15";
+      nameEl.style.color = a.isOther ? "#c8ccd4" : "#fff";
+    } else {
+      nameEl.style.display="none";
+    }
+
+    // 比例：所有等級都顯示（核心資訊）
+    bottom.style.display="block";
+    pctEl.textContent = pct.toFixed(1)+"%";
+    pctEl.style.fontSize = (level===3?21 : level===2?16 : level===1?13 : 10)+"px";
+    pctEl.style.lineHeight = "1.1";
+    pctEl.style.color = a.isOther?"#c8ccd4":"#fff";
+
+    // 金額：L3、L2 顯示，更小就砍
+    valEl.style.display = level>=2 ? "block" : "none";
+    valEl.textContent = nf(n.value);
+    valEl.style.fontSize = (level===3?11:10)+"px";
+    valEl.style.lineHeight = "1.2";
+    valEl.style.color = a.isOther?"#8a94a6":"rgba(255,255,255,.85)";
+  });
+  // 移除消失的
+  Object.keys(existing).forEach(id=>{ if(!seen.has(id)) existing[id].remove(); });
+}
+
+// ── 淨資產數字動畫 ──
+function animateNetWorth(to) {
+  const from = animatedNW, dur=550, t0=performance.now();
+  const el=document.getElementById("networth");
+  function tick(t){
+    const p=Math.min((t-t0)/dur,1);
+    const e=1-Math.pow(1-p,3);
+    el.textContent=nf(from+(to-from)*e);
+    if(p<1) requestAnimationFrame(tick); else animatedNW=to;
+  }
+  requestAnimationFrame(tick);
+}
+
+// ── 圖例 ──
+function renderLegend() {
+  const box=document.getElementById("legend");
+  box.innerHTML="";
+  GROUP_ORDER.forEach(cat=>{
+    const list=assets.filter(a=>a.cat===cat);
+    if(!list.length) return;
+    const gv=list.reduce((s,a)=>s+valueOf(a),0);
+    const g=document.createElement("div"); g.className="legend-group";
+    g.innerHTML=`<div class="legend-head"><span class="g-name">${CATEGORIES[cat].label}</span><span class="g-val">${nf(gv)}</span></div>`;
+    const items=document.createElement("div"); items.className="legend-items";
+    list.forEach(a=>{
+      const it=document.createElement("div"); it.className="legend-item";
+      it.innerHTML=`<span class="swatch" style="background:${a.color}"></span><span class="li-name">${a.name}</span>${a.cat!=="cash"?`<span class="li-qty">${a.qty}${CATEGORIES[a.cat].unit}</span>`:""}`;
+      it.addEventListener("click",()=>openAdjust(a.id));
+      items.appendChild(it);
+    });
+    g.appendChild(items); box.appendChild(g);
+  });
+}
+
+// ── 折線圖 ──
+function renderChart() {
+  const svg=document.getElementById("sparkline");
+  const W=340,H=120,pad=8;
+  if(history.length<2){
+    svg.innerHTML=`<text x="${W/2}" y="${H/2}" fill="#4b515c" font-size="12" text-anchor="middle">調整資產後這裡會顯示走勢</text>`;
+    document.getElementById("chartRange").textContent="—";
+    return;
+  }
+  const vals=history.map(h=>h.v);
+  const min=Math.min(...vals), max=Math.max(...vals);
+  const range=max-min||1;
+  const pts=history.map((h,i)=>{
+    const x=pad+(i/(history.length-1))*(W-pad*2);
+    const y=pad+(1-(h.v-min)/range)*(H-pad*2);
+    return [x,y];
+  });
+  const line=pts.map((p,i)=>(i?"L":"M")+p[0].toFixed(1)+" "+p[1].toFixed(1)).join(" ");
+  const area=line+` L${pts[pts.length-1][0].toFixed(1)} ${H-pad} L${pts[0][0].toFixed(1)} ${H-pad} Z`;
+  const up = vals[vals.length-1]>=vals[0];
+  const col = up ? "#3fb07a" : "#e8804a";
+  svg.innerHTML=`
+    <defs><linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${col}" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
+    </linearGradient></defs>
+    <path d="${area}" fill="url(#grad)"/>
+    <path d="${line}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="${pts[pts.length-1][0].toFixed(1)}" cy="${pts[pts.length-1][1].toFixed(1)}" r="4" fill="${col}"/>`;
+  document.getElementById("chartRange").textContent = `${history.length} 筆變化`;
+}
+
+function pushHistory() {
+  history.push({ v: netWorth(), t: Date.now() });
+  if (history.length>60) history.shift();
+}
+
+// 資料變動後統一呼叫：記歷史 + 存雲端 + 關面板 + 重繪
+function commit(changedAsset, opts={}) {
+  pushHistory();
+  if (changedAsset && !opts.deleted) saveAssetToCloud(changedAsset);
+  if (opts.deleted && changedAsset) deleteAssetFromCloud(changedAsset.id);
+  saveNetWorthSnapshot(netWorth()); // 雲端也記一筆淨值快照，供跨裝置折線圖
+  if (!opts.keepSheet) closeSheet();
+  renderAll();
+}
+
+// ── 全部重繪 ──
+function renderAll(animate=true) {
+  renderTreemap(); renderLegend(); renderChart();
+  const nw=netWorth();
+  if(animate) animateNetWorth(nw); else { document.getElementById("networth").textContent=nf(nw); animatedNW=nw; }
+  document.getElementById("subline").textContent = `${assets.length} 項資產`;
+}
+
+// ── 底部面板通用 ──
+function showSheet(html, accent) {
+  closeSheet();
+  const ov=document.createElement("div"); ov.className="overlay"; ov.id="overlay";
+  ov.innerHTML=`<div class="sheet" style="border-top:3px solid ${accent}"><div class="grabber"></div>${html}</div>`;
+  ov.addEventListener("click",e=>{ if(e.target===ov) closeSheet(); });
+  document.body.appendChild(ov);
+  return ov.querySelector(".sheet");
+}
+function closeSheet(){ const o=document.getElementById("overlay"); if(o) o.remove(); }
+
+// ── 調整資產（含編輯名稱、直接改值、快速增減）──
+function openAdjust(id) {
+  const a=assets.find(x=>x.id===id); if(!a) return;
+  const isCash=a.cat==="cash";
+  const unit=CATEGORIES[a.cat].unit;
+  const sub = isCash?`目前 ${nf(a.balance)}`:`持有 ${a.qty} ${unit} · ${nf(valueOf(a))}`;
+  let dir="add";
+
+  const editFields = isCash
+    ? `<div class="field"><div class="field-label">餘額</div>
+         <input class="sm-input" id="eBal" type="number" inputmode="numeric" value="${a.balance}"></div>`
+    : `<div class="field"><div class="field-label">代號</div>
+         <input class="sm-input" id="eSym" value="${a.symbol||""}"></div>
+       <div class="row2">
+         <div class="field" style="flex:1"><div class="field-label">${CATEGORIES[a.cat].qtyLabel}</div>
+           <input class="sm-input" id="eQty" type="number" inputmode="decimal" value="${a.qty}"></div>
+         <div class="field" style="flex:1"><div class="field-label">${CATEGORIES[a.cat].priceLabel}</div>
+           <input class="sm-input" id="ePrice" type="number" inputmode="decimal" value="${a.price}"></div>
+       </div>`;
+
+  const sheet=showSheet(`
+    <div class="sheet-asset-head">
+      <span class="swatch" style="width:16px;height:16px;border-radius:5px;background:${a.color}"></span>
+      <div><div class="sa-name">${a.name}</div><div class="sa-sub">${sub}</div></div>
+    </div>
+
+    <div class="seg-row">
+      <button class="seg-btn on" id="segQuick">快速增減</button>
+      <button class="seg-btn" id="segEdit">編輯內容</button>
+    </div>
+
+    <div id="paneQuick">
+      <div class="dir-row">
+        <button class="dir-btn add on" id="dAdd">＋ 增加</button>
+        <button class="dir-btn sub" id="dSub">－ 減少</button>
+      </div>
+      <input class="big-input" id="amt" type="number" inputmode="${isCash?"numeric":"decimal"}"
+        placeholder="${isCash?"輸入金額":"輸入數量（"+unit+"）"}" style="border:1.5px solid ${a.color}66">
+      ${isCash?`<div class="quick-row">${[1000,5000,10000,50000].map(q=>`<button class="quick-btn" data-q="${q}">${q/1000}k</button>`).join("")}</div>`:""}
+      <button class="primary-btn" id="applyBtn" disabled style="background:${a.color};color:#fff">確認</button>
+    </div>
+
+    <div id="paneEdit" style="display:none">
+      <div class="field"><div class="field-label">名稱</div>
+        <input class="sm-input" id="eName" value="${a.name}"></div>
+      ${editFields}
+      <button class="primary-btn" id="saveBtn" style="background:${a.color};color:#fff">儲存變更</button>
+    </div>
+
+    <button class="del-btn" id="delBtn">刪除此資產</button>
+  `, a.color);
+
+  // 分頁切換
+  const paneQuick=sheet.querySelector("#paneQuick");
+  const paneEdit=sheet.querySelector("#paneEdit");
+  const segQuick=sheet.querySelector("#segQuick");
+  const segEdit=sheet.querySelector("#segEdit");
+  segQuick.onclick=()=>{ segQuick.classList.add("on"); segEdit.classList.remove("on"); paneQuick.style.display="block"; paneEdit.style.display="none"; };
+  segEdit.onclick=()=>{ segEdit.classList.add("on"); segQuick.classList.remove("on"); paneEdit.style.display="block"; paneQuick.style.display="none"; };
+
+  // ── 快速增減 ──
+  const amt=sheet.querySelector("#amt");
+  const applyBtn=sheet.querySelector("#applyBtn");
+  const dAdd=sheet.querySelector("#dAdd"), dSub=sheet.querySelector("#dSub");
+  const setDir=d=>{dir=d;dAdd.classList.toggle("on",d==="add");dSub.classList.toggle("on",d==="sub");updateLabel();};
+  dAdd.onclick=()=>setDir("add"); dSub.onclick=()=>setDir("sub");
+  function updateLabel(){ applyBtn.textContent=(dir==="add"?"增加":"減少")+(isCash?"":" "+unit); }
+  amt.oninput=()=>{ if(isCash) amt.value=amt.value.replace(/[^\d]/g,""); applyBtn.disabled=!amt.value; };
+  sheet.querySelectorAll(".quick-btn").forEach(b=>b.onclick=()=>{amt.value=b.dataset.q;applyBtn.disabled=false;});
+  updateLabel();
+  applyBtn.onclick=()=>{
+    const v=Number(amt.value); if(!v||v<=0) return;
+    const sign=dir==="add"?1:-1;
+    if(isCash) a.balance=Math.max(0,a.balance+sign*v);
+    else a.qty=Math.max(0,+(a.qty+sign*v).toFixed(8));
+    commit(a);
+  };
+
+  // ── 編輯內容（改名稱、直接設定值）──
+  sheet.querySelector("#saveBtn").onclick=()=>{
+    const newName=sheet.querySelector("#eName").value.trim();
+    if(newName) a.name=newName;
+    if(isCash){
+      const b=sheet.querySelector("#eBal").value;
+      if(b!=="") a.balance=Math.max(0,Number(b));
+    } else {
+      const sym=sheet.querySelector("#eSym").value.trim();
+      const q=sheet.querySelector("#eQty").value;
+      const p=sheet.querySelector("#ePrice").value;
+      if(sym) a.symbol=sym;
+      if(q!=="") a.qty=Math.max(0,Number(q));
+      if(p!=="") a.price=Math.max(0,Number(p));
+    }
+    commit(a);
+  };
+
+  sheet.querySelector("#delBtn").onclick=()=>{
+    assets=assets.filter(x=>x.id!==id); commit(a, {deleted:true});
+  };
+}
+
+// ── 「其他」展開 ──
+function openOtherSheet(other) {
+  const rows=other.members.map(a=>{
+    const unit=CATEGORIES[a.cat].unit;
+    return `<div class="legend-item" data-id="${a.id}" style="justify-content:space-between;width:100%;padding:12px 0;border-bottom:1px solid #1f222a">
+      <span style="display:flex;align-items:center;gap:9px"><span class="swatch" style="background:${a.color}"></span><span class="li-name">${a.name}</span></span>
+      <span style="font-size:13px;color:#8a94a6;font-variant-numeric:tabular-nums">${nf(valueOf(a))}</span>
+    </div>`;
+  }).join("");
+  const sheet=showSheet(`
+    <div class="sheet-title">其他（3% 以下）</div>
+    <div class="sheet-desc">點項目可調整</div>
+    ${rows}
+  `, OTHER_COLOR);
+  sheet.querySelectorAll(".legend-item").forEach(r=>r.onclick=()=>openAdjust(r.dataset.id));
+}
+
+// ── 新增資產 ──
+function openAdd() {
+  let cat=null;
+  const sheet=showSheet(`
+    <div class="sheet-title">新增資產</div>
+    <div class="sheet-desc">先選類別，再填內容</div>
+    <div class="cat-row">
+      ${GROUP_ORDER.map(k=>`<button class="cat-btn" data-cat="${k}">${CATEGORIES[k].label}</button>`).join("")}
+    </div>
+    <div id="fields"></div>
+  `, "#5b8def");
+
+  const fields=sheet.querySelector("#fields");
+  sheet.querySelectorAll(".cat-btn").forEach(b=>b.onclick=()=>{
+    cat=b.dataset.cat;
+    const pc=CATEGORIES[cat].palette[0];
+    sheet.querySelectorAll(".cat-btn").forEach(x=>{x.style.border="1.5px solid #23252e";x.style.background="#1c1e26";x.style.color="#a7adb8";});
+    b.style.border=`1.5px solid ${pc}`; b.style.background=pc+"22"; b.style.color="#fff";
+    renderFields(cat);
+  });
+
+  function renderFields(cat) {
+    const c=CATEGORIES[cat];
+    fields.innerHTML = `<div class="expand-note">
+      <div class="field"><div class="field-label">名稱</div>
+        <input class="sm-input" id="fName" placeholder="${cat==="cash"?"例：國泰世華":cat==="crypto"?"例：Solana":"例：台積電"}"></div>
+      ${cat==="cash"
+        ? `<div class="field"><div class="field-label">初始金額</div><input class="sm-input" id="fBal" type="number" inputmode="numeric" placeholder="0"></div>`
+        : `<div class="field"><div class="field-label">代號</div><input class="sm-input" id="fSym" placeholder="${cat==="crypto"?"例：SOL":"例：2330"}"></div>
+           <div class="row2">
+             <div class="field" style="flex:1"><div class="field-label">${c.qtyLabel}</div><input class="sm-input" id="fQty" type="number" inputmode="decimal" placeholder="${cat==="crypto"?"0.05":"100"}"></div>
+             <div class="field" style="flex:1"><div class="field-label">${c.priceLabel}</div><input class="sm-input" id="fPrice" type="number" inputmode="decimal" placeholder="${cat==="crypto"?"6000000":"1000"}"></div>
+           </div>
+           <div class="note-sm">＊之後接即時價 API 後價格會自動更新，你只要維護數量</div>`}
+      <button class="primary-btn" id="addConfirm" disabled style="background:#5b8def;color:#fff">新增到資產</button>
+    </div>`;
+
+    const nameEl=fields.querySelector("#fName");
+    const confirm=fields.querySelector("#addConfirm");
+    const check=()=>{
+      let ok=nameEl.value.trim();
+      if(cat==="cash") ok=ok && fields.querySelector("#fBal").value!=="";
+      else ok=ok && fields.querySelector("#fQty").value!=="" && fields.querySelector("#fPrice").value!=="";
+      confirm.disabled=!ok;
+    };
+    fields.querySelectorAll("input").forEach(i=>i.oninput=check);
+    nameEl.focus();
+    confirm.onclick=()=>{
+      const id="a"+Date.now();
+      const used=assets.map(a=>a.color);
+      const color=CATEGORIES[cat].palette.find(c=>!used.includes(c))||CATEGORIES[cat].palette[0];
+      if(cat==="cash"){
+        assets.push({id,cat,name:nameEl.value.trim(),color,balance:Number(fields.querySelector("#fBal").value)});
+      } else {
+        assets.push({id,cat,name:nameEl.value.trim(),color,
+          symbol:(fields.querySelector("#fSym").value||nameEl.value).trim(),
+          qty:Number(fields.querySelector("#fQty").value),
+          price:Number(fields.querySelector("#fPrice").value)});
+      }
+      const newA = assets[assets.length-1];
+      commit(newA);
+      // 若新增的是幣，順手抓它的即時價
+      if (cat==="crypto") refreshPrices(true);
+    };
+  }
+}
+
+document.getElementById("addBtn").onclick=openAdd;
+document.getElementById("refreshBtn").onclick=()=>refreshPrices(false);
+
+// ── 即時價 ──
+// 幣價：CoinGecko 公開 API（免金鑰、直接回台幣、有開 CORS，前端可直接抓）
+// 股價：證交所即時 API 不允許前端跨域，需等部署到 Vercel 後用 serverless 代理，
+//       這裡先留好開關與函式，上線後把 STOCK_API_READY 設 true 並填入你的代理網址。
+const STOCK_API_READY = false;
+const STOCK_PROXY_URL = "/api/twstock"; // 上 Vercel 後啟用
+
+async function fetchCryptoPrices() {
+  const cryptos = assets.filter(a => a.cat === "crypto");
+  if (!cryptos.length) return { ok:0, fail:0, err:null };
+  const idMap = {};
+  cryptos.forEach(a => {
+    const id = COINGECKO_IDS[(a.symbol||"").toUpperCase()] || (a.symbol||"").toLowerCase();
+    if (!idMap[id]) idMap[id] = [];
+    idMap[id].push(a);
+  });
+  const ids = Object.keys(idMap).join(",");
+
+  // 依序嘗試多個來源，任一成功就用（回傳 { id: twdPrice }）
+  const sources = [
+    // 1) CoinGecko 直接回台幣
+    async () => {
+      const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(ids)}&vs_currencies=twd`);
+      if (!r.ok) throw new Error("CoinGecko HTTP "+r.status);
+      const d = await r.json();
+      const out = {};
+      Object.keys(idMap).forEach(id => { if (d[id]&&d[id].twd) out[id]=d[id].twd; });
+      if (!Object.keys(out).length) throw new Error("CoinGecko 無資料");
+      return out;
+    },
+    // 2) CoinGecko 回美元，再用匯率換台幣（有時 twd 被限、usd 可通）
+    async () => {
+      const [pr, fx] = await Promise.all([
+        fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(ids)}&vs_currencies=usd`),
+        fetch(`https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=twd`)
+      ]);
+      if (!pr.ok) throw new Error("CG-usd HTTP "+pr.status);
+      const d = await pr.json();
+      let usdtwd = 32; // 保底匯率
+      try { const f = await fx.json(); if (f.tether&&f.tether.twd) usdtwd = f.tether.twd; } catch(e){}
+      const out = {};
+      Object.keys(idMap).forEach(id => { if (d[id]&&d[id].usd) out[id]=d[id].usd*usdtwd; });
+      if (!Object.keys(out).length) throw new Error("CG-usd 無資料");
+      return out;
+    },
+  ];
+
+  let out=null, lastErr=null;
+  for (const src of sources) {
+    try { out = await src(); if (out) break; }
+    catch(e) { lastErr = e; }
+  }
+
+  let ok=0, fail=0;
+  if (out) {
+    Object.entries(idMap).forEach(([id, list]) => {
+      if (out[id]) { list.forEach(a => a.price = out[id]); ok += list.length; }
+      else fail += list.length;
+    });
+  } else {
+    fail = cryptos.length;
+  }
+  return { ok, fail, err: out ? null : (lastErr ? lastErr.message : "全部來源失敗") };
+}
+
+async function fetchStockPrices() {
+  if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true };
+  const stocks = assets.filter(a => a.cat === "stock");
+  if (!stocks.length) return { ok:0, fail:0 };
+  const codes = stocks.map(a => a.symbol).join(",");
+  let ok=0, fail=0;
+  try {
+    const res = await fetch(`${STOCK_PROXY_URL}?codes=${encodeURIComponent(codes)}`);
+    if (!res.ok) throw new Error("HTTP "+res.status);
+    const data = await res.json(); // 預期格式：{ "0050": 108.25, ... }
+    stocks.forEach(a => {
+      if (data[a.symbol]) { a.price = data[a.symbol]; ok++; }
+      else fail++;
+    });
+  } catch(e) {
+    fail = stocks.length;
+    console.warn("股價抓取失敗:", e.message);
+  }
+  return { ok, fail };
+}
+
+let refreshing = false;
+async function refreshPrices(silent=false) {
+  if (refreshing) return;
+  refreshing = true;
+  const btn = document.getElementById("refreshBtn");
+  if (btn) btn.classList.add("spinning");
+  const status = document.getElementById("priceStatus");
+  if (status && !silent) status.textContent = "更新價格中…";
+
+  const [c, s] = await Promise.all([fetchCryptoPrices(), fetchStockPrices()]);
+
+  if (btn) btn.classList.remove("spinning");
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2,"0");
+  const mm = String(now.getMinutes()).padStart(2,"0");
+  if (status) {
+    if (c.ok>0 && c.fail===0) {
+      status.textContent = `價格更新於 ${hh}:${mm}`;
+      status.style.color = "#5b616e";
+    } else if (c.ok>0) {
+      status.textContent = `已更新 ${c.ok} 項，${c.fail} 項失敗`;
+      status.style.color = "#e8804a";
+    } else {
+      // 全失敗：顯示原因，多半是 file:// 開啟或被限流
+      const reason = c.err && /Failed to fetch|NetworkError|CORS/i.test(c.err)
+        ? "無法連線（可能是用檔案直接開啟，需用網址開啟）"
+        : (c.err || "抓取失敗");
+      status.textContent = `幣價更新失敗：${reason}`;
+      status.style.color = "#e8804a";
+    }
+  }
+  refreshing = false;
+  renderAll();
+}
+
+// ── 初始化 ──
+window.addEventListener("resize",()=>renderTreemap());
+
+async function boot() {
+  initSupabase();
+  if (cloudOn()) {
+    const status=document.getElementById("priceStatus");
+    if(status) status.textContent="從雲端載入中…";
+    await loadFromCloud();
+    const gotHistory = await loadNetWorthHistory();
+    // 雲端還沒有任何歷史點（例如第一次啟用同步）：補記目前這筆，讓折線圖有起點
+    if (!gotHistory || history.length===0) {
+      pushHistory();
+      saveNetWorthSnapshot(netWorth());
+    }
+  } else {
+    pushHistory();
+  }
+  renderAll(false);
+  setTimeout(()=>renderTreemap(),50);
+  refreshPrices(true); // 打開就抓一次即時幣價
+}
+boot();
+</script>
+</body>
+</html>
+
   }
   body { display: flex; justify-content: center; }
   #app {
