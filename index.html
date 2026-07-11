@@ -8,10 +8,15 @@
 <title>資產檢視器</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  #app, #app * {
+  * {
+    margin: 0; padding: 0; box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
     -webkit-user-select: none; -moz-user-select: none; user-select: none;
-    -webkit-touch-callout: none;
+    -webkit-touch-callout: none; /* 關閉 iOS 長按跳出的複製/查詢選單，避免跟拖曳手勢打架 */
+  }
+  input, textarea {
+    -webkit-user-select: text; -moz-user-select: text; user-select: text;
+    -webkit-touch-callout: default;
   }
   html, body {
     background: #0b0c10; color: #e8eaed;
@@ -20,7 +25,7 @@
   }
   body { display: flex; justify-content: center; }
   #app {
-    width: 100%; max-width: 393px; /* iPhone 16 邏輯寬度 */ 
+    width: 100%; max-width: 393px; /* iPhone 16 邏輯寬度 */
     min-height: 100vh; position: relative;
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);
@@ -52,7 +57,7 @@
   #treemap-inner { position: relative; width: 100%; height: 100%; }
   .tile {
     position: absolute; padding: 3.5px; cursor: pointer;
-    touch-action: pan-y; /* 預設允許上下滑動頁面；拖曳啟動後改由 .dragging 鎖定 */
+    touch-action: none; /* 完全交由 JS 判斷：快滑=手動捲動頁面、按住不動=拿起方塊，避免跟瀏覽器原生滑動搶手勢 */
     transition: left .55s cubic-bezier(.34,1.15,.4,1), top .55s cubic-bezier(.34,1.15,.4,1),
                 width .55s cubic-bezier(.34,1.15,.4,1), height .55s cubic-bezier(.34,1.15,.4,1);
   }
@@ -533,11 +538,12 @@ function renderTreemap() {
 // 拖曳時其他方塊會依 squarified treemap 重新計算、平滑流動讓位（既有的 CSS transition 負責這段動畫）
 function attachTileInteraction(el, assetRef) {
   const LONG_PRESS_MS = 320;
-  const MOVE_CANCEL_PX = 9; // 長按計時器觸發前，手指移動超過這個距離視為滑動頁面，取消拖曳
+  const MOVE_CANCEL_PX = 10; // 長按計時器觸發前，手指移動超過這個距離視為滑動頁面，取消拖曳
 
   let timer = null;
   let dragActive = false;
   let startX=0, startY=0, startLeft=0, startTop=0;
+  let lastY=0; // 用來算「這一格」垂直移動量，手動捲動頁面用
   let lastIntentKey = null;
   let layoutTouched = false; // 這次拖曳是否真的改動了版面結構（決定要不要存雲端）
 
@@ -577,7 +583,13 @@ function attachTileInteraction(el, assetRef) {
     if (!a) return cleanup();
 
     if (!dragActive) {
-      // 尚未進入拖曳模式：若移動太多，視為滑動頁面，取消長按計時
+      // 尚未進入拖曳模式：因為 .tile 已關閉瀏覽器原生手勢（touch-action:none），
+      // 這裡改由我們自己手動捲動頁面，讓「快速滑動」的手感跟原生一樣順、又不會被誤判成拖曳
+      e.preventDefault();
+      const dyFrame = e.clientY - lastY;
+      lastY = e.clientY;
+      window.scrollBy(0, -dyFrame);
+
       const dx0 = e.clientX-startX, dy0=e.clientY-startY;
       if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) { clearTimeout(timer); timer=null; }
       return;
@@ -637,6 +649,7 @@ function attachTileInteraction(el, assetRef) {
   el.addEventListener("pointerdown", (e) => {
     if (e.button !== undefined && e.button !== 0) return; // 只回應主要按鍵/單指
     startX = e.clientX; startY = e.clientY;
+    lastY = e.clientY;
     startLeft = parseFloat(el.style.left)||0;
     startTop = parseFloat(el.style.top)||0;
     dragActive = false;
