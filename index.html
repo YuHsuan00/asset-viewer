@@ -85,6 +85,14 @@
   .tile-val { color: rgba(255,255,255,.85); font-variant-numeric: tabular-nums; text-align: left; }
 
   .section-label { font-size: 11px; letter-spacing: 2px; color: #6b7280; margin: 4px 0 12px; }
+  .mode-btn {
+    display: flex; align-items: center; gap: 5px;
+    border: 1px solid #23252e; background: #16181f; color: #6b7280;
+    border-radius: 20px; padding: 5px 11px 5px 9px; font-size: 11px; letter-spacing: 0.5px;
+    cursor: pointer; transition: all .15s;
+  }
+  .mode-btn.on { border-color: #5b8def; background: #5b8def22; color: #a9c3f5; }
+  .mode-btn:active { transform: scale(.95); }
   .legend-group { margin-bottom: 16px; }
   .legend-head { display: flex; justify-content: space-between; margin-bottom: 9px; }
   .legend-head .g-name { font-size: 12px; color: #6b7280; letter-spacing: 1px; }
@@ -165,7 +173,13 @@
   <div id="treemap"><div id="treemap-inner"></div></div>
 
   <div class="wrap">
-    <div class="section-label">組成</div>
+    <div class="section-label" style="display:flex;align-items:center;justify-content:space-between">
+      <span>組成</span>
+      <button class="mode-btn" id="freeModeBtn" title="自由排列：關閉同類別限制">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+        <span>自由排列</span>
+      </button>
+    </div>
     <div id="legend"></div>
   </div>
 
@@ -424,8 +438,39 @@ function healCategoryLayouts(bigList) {
   });
 }
 
+// 自由排列模式：關閉後不再限制「同類別才能排在一起」，所有資產可以自由跟任何資產排在同一排
+let freeMode = false;
+try { freeMode = localStorage.getItem("assel_freeMode") === "1"; } catch(e) {}
+
+// 拖曳/存版面時要用的 key：自由模式下大家共用同一份 "__free__" 版面，否則各類別各自一份
+function layoutKey(a) { return freeMode ? "__free__" : a.cat; }
+
 function layoutGrouped(w, h) {
   const { big, small } = buildDisplayItems();
+  const smallVal = small.reduce((s,a)=>s+valueOf(a),0);
+
+  if (freeMode) {
+    // 自由模式：所有資產（不分類別）混在同一份 rows 結構裡，僅跟「其他」分開兩區
+    if (ensureCategoryLayout("__free__", big.map(a=>a.id))) saveCategoryLayout("__free__");
+    const groups = [];
+    const bigVal = big.reduce((s,a)=>s+valueOf(a),0);
+    if (bigVal>0) groups.push({ key:"__free__", value:bigVal, other:false });
+    if (smallVal>0) groups.push({ key:"__other__", list:small, value:smallVal, other:true });
+
+    const gNodes = layoutTreemap(groups, 0,0,w,h);
+    let all=[];
+    gNodes.forEach(gn=>{
+      if (gn.other) {
+        all.push({ id:"__other__", value:gn.value, ref:{ id:"__other__", name:"其他", color:OTHER_COLOR, isOther:true, members:gn.list },
+          x:gn.x, y:gn.y, w:gn.w, h:gn.h });
+      } else {
+        const inner = layoutRows(categoryLayout["__free__"] || [], gn.x, gn.y, gn.w, gn.h);
+        all = all.concat(inner);
+      }
+    });
+    return all;
+  }
+
   healCategoryLayouts(big);
   // 分群：各 cat 一區，額外一個 "其他" 區（若有 small）
   const groups = [];
@@ -434,7 +479,6 @@ function layoutGrouped(w, h) {
     const value = list.reduce((s,a)=>s+valueOf(a),0);
     if (value>0) groups.push({ key:cat, list, value, other:false });
   });
-  const smallVal = small.reduce((s,a)=>s+valueOf(a),0);
   if (smallVal>0) groups.push({ key:"__other__", list:small, value:smallVal, other:true });
 
   const gNodes = layoutTreemap(groups.map(g=>({...g,value:g.value})), 0,0,w,h);
@@ -661,12 +705,13 @@ function attachTileInteraction(el, assetRef) {
     el.style.left = newLeft+"px";
     el.style.top = newTop+"px";
 
-    // 用拖曳方塊的中心點，判斷目前疊在同類別的哪個方塊上
+    // 用拖曳方塊的中心點，判斷目前疊在哪個方塊上
+    // 自由模式（freeMode）下不限制類別；否則只在同類別內判定
     // 這裡刻意用「拿起來那一刻」凍結的 hitW/hitH，不用即時 DOM 尺寸，
     // 否則方塊視覺變形會回頭影響判定、判定又觸發變形，形成抖動的回饋迴圈
     const cx = newLeft + hitW/2, cy = newTop + hitH/2;
     const hovered = lastNodes.find(n =>
-      n.id !== assetRef.id && n.ref && !n.ref.isOther && n.ref.cat === a.cat &&
+      n.id !== assetRef.id && n.ref && !n.ref.isOther && (freeMode || n.ref.cat === a.cat) &&
       cx >= n.x && cx <= n.x+n.w && cy >= n.y && cy <= n.y+n.h
     );
     if (!hovered) return;
@@ -683,7 +728,7 @@ function attachTileInteraction(el, assetRef) {
     if (key === lastIntentKey) return;
     lastIntentKey = key;
 
-    applyIntent(a.cat, a.id, intent);
+    applyIntent(layoutKey(a), a.id, intent);
     layoutTouched = true;
     renderTreemap(); // 其他方塊依新結構平滑重新排列、讓位；拖曳中的方塊也會跟著變形（見 dragging 的 transition 設定）
   }
@@ -700,10 +745,10 @@ function attachTileInteraction(el, assetRef) {
       return;
     }
 
-    const cat = assetRef.cat;
+    const key = layoutKey(assetRef);
     cleanup();
     renderTreemap(); // 放開後，讓拖曳方塊也平滑歸位到最終計算出的格子（含形狀）
-    if (layoutTouched) saveCategoryLayout(cat);
+    if (layoutTouched) saveCategoryLayout(key);
     layoutTouched = false;
   }
 
@@ -1087,6 +1132,16 @@ function openAdd() {
 
 document.getElementById("addBtn").onclick=openAdd;
 document.getElementById("refreshBtn").onclick=()=>refreshPrices(false);
+
+const freeModeBtn = document.getElementById("freeModeBtn");
+function updateFreeModeBtn() { freeModeBtn.classList.toggle("on", freeMode); }
+updateFreeModeBtn();
+freeModeBtn.onclick = () => {
+  freeMode = !freeMode;
+  try { localStorage.setItem("assel_freeMode", freeMode ? "1" : "0"); } catch(e) {}
+  updateFreeModeBtn();
+  renderAll();
+};
 
 // ── 即時價 ──
 // 幣價：CoinGecko 公開 API（免金鑰、直接回台幣、有開 CORS，前端可直接抓）
