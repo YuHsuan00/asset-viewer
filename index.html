@@ -211,11 +211,16 @@ async function loadFromCloud() {
     const { data, error } = await sb.from("assets").select("*").order("created_at",{ascending:true});
     if (error) throw error;
     if (data && data.length) {
+      // 雲端已經有資料：以雲端為準（多裝置同步的正常情況）
       assets = data.map(r => ({
         id: r.id, cat: r.cat, name: r.name, color: r.color,
         ...(r.cat==="cash" ? { balance: Number(r.balance)||0 }
                            : { qty: Number(r.qty)||0, price: Number(r.price)||0, symbol: r.symbol||"" })
       }));
+    } else {
+      // 雲端是空的（第一次啟用同步）：把目前本機的資產「種」進雲端，
+      // 避免之後任何一筆變動只存單一資產、其餘資產從沒上雲、被誤判成「只剩一筆」。
+      for (const a of assets) { await saveAssetToCloud(a); }
     }
     return true;
   } catch(e) { console.warn("雲端載入失敗:", e.message); return false; }
@@ -882,7 +887,11 @@ async function refreshPrices(silent=false) {
   const hh = String(now.getHours()).padStart(2,"0");
   const mm = String(now.getMinutes()).padStart(2,"0");
   if (status) {
-    if (c.ok>0 && c.fail===0) {
+    const hasCrypto = assets.some(a => a.cat === "crypto");
+    if (!hasCrypto) {
+      status.textContent = `價格更新於 ${hh}:${mm}（尚無幣種）`;
+      status.style.color = "#5b616e";
+    } else if (c.ok>0 && c.fail===0) {
       status.textContent = `價格更新於 ${hh}:${mm}`;
       status.style.color = "#5b616e";
     } else if (c.ok>0) {
