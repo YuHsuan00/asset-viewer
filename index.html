@@ -5,7 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>資產檢視器</title>
+<meta name="apple-mobile-web-app-title" content="Asselas">
+<meta name="theme-color" content="#0b0c10">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="manifest" href="/manifest.json">
+<title>Asselas</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   * {
@@ -544,6 +549,8 @@ function attachTileInteraction(el, assetRef) {
   let dragActive = false;
   let startX=0, startY=0, startLeft=0, startTop=0;
   let lastY=0; // 用來算「這一格」垂直移動量，手動捲動頁面用
+  let scrolling=false; // 是否已確認這次手勢是「捲動頁面」（超過無反應區門檻後才會是 true）
+  let hitW=0, hitH=0; // 判定用的固定尺寸（拿起來那一刻凍結，不受中途變形影響）
   let lastIntentKey = null;
   let layoutTouched = false; // 這次拖曳是否真的改動了版面結構（決定要不要存雲端）
 
@@ -555,6 +562,7 @@ function attachTileInteraction(el, assetRef) {
     el.style.zIndex = "";
     el.style.transition = "";
     lastIntentKey = null;
+    hitW = 0; hitH = 0;
   }
 
   // 把資產從目前列陣結構中移除，再依「意圖」插入：
@@ -583,15 +591,22 @@ function attachTileInteraction(el, assetRef) {
     if (!a) return cleanup();
 
     if (!dragActive) {
-      // 尚未進入拖曳模式：因為 .tile 已關閉瀏覽器原生手勢（touch-action:none），
-      // 這裡改由我們自己手動捲動頁面，讓「快速滑動」的手感跟原生一樣順、又不會被誤判成拖曳
+      const dx0 = e.clientX-startX, dy0=e.clientY-startY;
+      if (!scrolling) {
+        // 移動還在無反應區內：完全不做任何事（不捲動、不取消長按計時），
+        // 避免手拿著手機的自然手震被誤判成「要捲動」而讓畫面抖動
+        if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) {
+          clearTimeout(timer); timer=null;
+          scrolling = true;
+          lastY = e.clientY; // 從超過門檻的這一刻開始才手動捲動，之後跟手捲動
+        }
+        return;
+      }
+      // 已確定是滑動意圖：手動捲動頁面（.tile 關閉了瀏覽器原生手勢，改由這裡接手）
       e.preventDefault();
       const dyFrame = e.clientY - lastY;
       lastY = e.clientY;
       window.scrollBy(0, -dyFrame);
-
-      const dx0 = e.clientX-startX, dy0=e.clientY-startY;
-      if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) { clearTimeout(timer); timer=null; }
       return;
     }
 
@@ -602,8 +617,9 @@ function attachTileInteraction(el, assetRef) {
     el.style.top = newTop+"px";
 
     // 用拖曳方塊的中心點，判斷目前疊在同類別的哪個方塊上
-    const w = parseFloat(el.style.width), h = parseFloat(el.style.height);
-    const cx = newLeft + w/2, cy = newTop + h/2;
+    // 這裡刻意用「拿起來那一刻」凍結的 hitW/hitH，不用即時 DOM 尺寸，
+    // 否則方塊視覺變形會回頭影響判定、判定又觸發變形，形成抖動的回饋迴圈
+    const cx = newLeft + hitW/2, cy = newTop + hitH/2;
     const hovered = lastNodes.find(n =>
       n.id !== assetRef.id && n.ref && !n.ref.isOther && n.ref.cat === a.cat &&
       cx >= n.x && cx <= n.x+n.w && cy >= n.y && cy <= n.y+n.h
@@ -653,15 +669,20 @@ function attachTileInteraction(el, assetRef) {
     startLeft = parseFloat(el.style.left)||0;
     startTop = parseFloat(el.style.top)||0;
     dragActive = false;
+    scrolling = false;
 
     timer = setTimeout(() => {
       if (assetRef.isOther) return; // 「其他」聚合方塊沒有單一位置概念，不支援拖曳
       dragActive = true;
       draggingId = assetRef.id;
+      // 判定用的尺寸：固定用「拿起來那一刻」的原始大小，不會因為方塊中途變形而跟著跳動
+      // （避免「變形→判定改變→又變形」自己打自己造成的抖動）
+      hitW = parseFloat(el.style.width)||0;
+      hitH = parseFloat(el.style.height)||0;
       el.classList.add("dragging");
       el.style.zIndex = "40";
       // 位置(left/top)不放進 transition，才能精準跟著手指；
-      // 但把 width/height 放進去，讓拖曳中的方塊能隨著版面結構改變而平滑「變形」
+      // 但把 width/height 放進去，讓拖曳中的方塊「視覺上」能隨版面變化平滑變形（純視覺，不影響判定）
       el.style.transition = "width .22s ease, height .22s ease, box-shadow .2s ease, transform .15s ease";
     }, LONG_PRESS_MS);
 
