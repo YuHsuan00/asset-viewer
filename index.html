@@ -79,10 +79,10 @@
     display: flex; flex-direction: column; justify-content: space-between;
     padding: 12px; overflow: hidden; transition: box-shadow .3s, transform .15s ease;
   }
-  .tile-name { font-weight: 700; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.28);
+  .tile-name { font-weight: 700; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.28); text-align: left;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tile-pct { font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; text-shadow: 0 1px 3px rgba(0,0,0,.28); }
-  .tile-val { color: rgba(255,255,255,.85); font-variant-numeric: tabular-nums; }
+  .tile-pct { font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; text-shadow: 0 1px 3px rgba(0,0,0,.28); text-align: left; }
+  .tile-val { color: rgba(255,255,255,.85); font-variant-numeric: tabular-nums; text-align: left; }
 
   .section-label { font-size: 11px; letter-spacing: 2px; color: #6b7280; margin: 4px 0 12px; }
   .legend-group { margin-bottom: 16px; }
@@ -474,12 +474,12 @@ function renderTreemap() {
     seen.add(n.id);
     const pct = (n.value/nw)*100;
 
-    // 依方塊大小分級，優先保留「數字」(比例最重要)，空間不夠才砍名稱：
-    // L3 大：名稱 + 比例 + 金額
-    // L2 中：比例 + 金額（無名稱）
-    // L1 小：只有比例
-    // L0 極小：只有比例(縮到最小)
-    const level =
+    // 依方塊「形狀」而非只看面積決定排版：
+    // 寬扁格（夠寬但不夠高，例如整排只有一項）→ 改用橫向排版：名稱靠左、數字靠右，善用橫向空間
+    // 其他情況維持直向堆疊，依大小分四級決定顯示多少內容
+    const wideShort = n.w >= 150 && n.h < 62 && n.h >= 30;
+
+    const level = wideShort ? null :
       (n.w>=88 && n.h>=62) ? 3 :
       (n.w>=56 && n.h>=42) ? 2 :
       (n.w>=40 && n.h>=26) ? 1 : 0;
@@ -501,39 +501,84 @@ function renderTreemap() {
     const innerEl = el.querySelector(".tile-inner");
     innerEl.style.background = a.isOther ? "#22252d" : `linear-gradient(145deg, ${a.color}, ${a.color}c4)`;
     innerEl.style.boxShadow = `0 3px 14px ${a.color}2e`;
-    innerEl.style.padding = level<=1 ? "6px 7px" : "11px 12px";
-    innerEl.style.justifyContent = level>=3 ? "space-between" : "center";
 
     const nameEl=el.querySelector(".tile-name");
     const bottom=el.querySelector(".tile-bottom");
     const pctEl=el.querySelector(".tile-pct");
     const valEl=el.querySelector(".tile-val");
 
-    // 名稱只在 L3 顯示（其他等級砍掉，優先留數字）
-    // 「其他」方塊字級縮小，避免被裁
-    if (level>=3) {
+    if (wideShort) {
+      // 橫向排版：名稱在左、比例+金額在右（金額疊在比例下方、靠右對齊），充分利用寬度
+      innerEl.style.flexDirection = "row";
+      innerEl.style.alignItems = "center";
+      innerEl.style.justifyContent = "space-between";
+      innerEl.style.padding = "0 16px";
+
       nameEl.style.display="block";
       nameEl.textContent = a.name;
-      nameEl.style.fontSize = (a.isOther?13:16)+"px";
+      nameEl.style.fontSize = (a.isOther?14:16)+"px";
       nameEl.style.lineHeight = "1.15";
       nameEl.style.color = a.isOther ? "#c8ccd4" : "#fff";
+      nameEl.style.flex = "1 1 auto";
+      nameEl.style.minWidth = "0"; // 讓 ellipsis 在橫向排版下也能正常截斷
+
+      bottom.style.display = "flex";
+      bottom.style.flexDirection = "column";
+      bottom.style.alignItems = "flex-end"; // 數字靠右對齊，跟左邊名稱區隔開
+      bottom.style.flex = "0 0 auto";
+      bottom.style.marginLeft = "10px";
+
+      pctEl.textContent = pct.toFixed(1)+"%";
+      pctEl.style.fontSize = (a.isOther?15:19)+"px";
+      pctEl.style.lineHeight = "1.1";
+      pctEl.style.color = a.isOther?"#c8ccd4":"#fff";
+      pctEl.style.textAlign = "right";
+
+      valEl.style.display = "block";
+      valEl.textContent = nf(n.value);
+      valEl.style.fontSize = "11.5px";
+      valEl.style.lineHeight = "1.2";
+      valEl.style.color = a.isOther?"#8a94a6":"rgba(255,255,255,.85)";
+      valEl.style.textAlign = "right";
     } else {
-      nameEl.style.display="none";
+      // 直向堆疊（原本邏輯）：依面積分四級決定顯示多少內容
+      innerEl.style.flexDirection = "column";
+      innerEl.style.justifyContent = level>=3 ? "space-between" : "center";
+      innerEl.style.padding = level<=1 ? "6px 7px" : "11px 12px";
+      bottom.style.display = "block";
+      bottom.style.flexDirection = "";
+      bottom.style.alignItems = "";
+      bottom.style.marginLeft = "";
+
+      // 名稱只在 L3 顯示（其他等級砍掉，優先留數字）
+      // 「其他」方塊字級縮小，避免被裁
+      if (level>=3) {
+        nameEl.style.display="block";
+        nameEl.textContent = a.name;
+        nameEl.style.fontSize = (a.isOther?13:16)+"px";
+        nameEl.style.lineHeight = "1.15";
+        nameEl.style.color = a.isOther ? "#c8ccd4" : "#fff";
+        nameEl.style.flex = "";
+        nameEl.style.minWidth = "";
+      } else {
+        nameEl.style.display="none";
+      }
+
+      // 比例：所有等級都顯示（核心資訊）
+      pctEl.textContent = pct.toFixed(1)+"%";
+      pctEl.style.fontSize = (level===3?21 : level===2?16 : level===1?13 : 10)+"px";
+      pctEl.style.lineHeight = "1.1";
+      pctEl.style.color = a.isOther?"#c8ccd4":"#fff";
+      pctEl.style.textAlign = "left";
+
+      // 金額：L3、L2 顯示，更小就砍
+      valEl.style.display = level>=2 ? "block" : "none";
+      valEl.textContent = nf(n.value);
+      valEl.style.fontSize = (level===3?11:10)+"px";
+      valEl.style.lineHeight = "1.2";
+      valEl.style.color = a.isOther?"#8a94a6":"rgba(255,255,255,.85)";
+      valEl.style.textAlign = "left";
     }
-
-    // 比例：所有等級都顯示（核心資訊）
-    bottom.style.display="block";
-    pctEl.textContent = pct.toFixed(1)+"%";
-    pctEl.style.fontSize = (level===3?21 : level===2?16 : level===1?13 : 10)+"px";
-    pctEl.style.lineHeight = "1.1";
-    pctEl.style.color = a.isOther?"#c8ccd4":"#fff";
-
-    // 金額：L3、L2 顯示，更小就砍
-    valEl.style.display = level>=2 ? "block" : "none";
-    valEl.textContent = nf(n.value);
-    valEl.style.fontSize = (level===3?11:10)+"px";
-    valEl.style.lineHeight = "1.2";
-    valEl.style.color = a.isOther?"#8a94a6":"rgba(255,255,255,.85)";
   });
   // 移除消失的
   Object.keys(existing).forEach(id=>{ if(!seen.has(id)) existing[id].remove(); });
