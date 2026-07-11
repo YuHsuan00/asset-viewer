@@ -248,12 +248,17 @@ async function saveNetWorthSnapshot(value) {
   catch(e) { console.warn("歷史快照儲存失敗:", e.message); }
 }
 
-// 讀最近的淨值歷史（供折線圖）
+// 讀近 24 個月的淨值歷史（供月折線圖）
 async function loadNetWorthHistory() {
   if (!cloudOn()) return false;
   try {
+    const since = new Date();
+    since.setMonth(since.getMonth() - 24);
     const { data, error } = await sb.from("net_worth_history")
-      .select("value,created_at").order("created_at",{ascending:true}).limit(60);
+      .select("value,created_at")
+      .gte("created_at", since.toISOString())
+      .order("created_at", { ascending: true })
+      .limit(5000);
     if (error) throw error;
     if (data && data.length) {
       history = data.map(r => ({ v: Number(r.value), t: new Date(r.created_at).getTime() }));
@@ -460,41 +465,102 @@ function renderLegend() {
   });
 }
 
-// ── 折線圖 ──
+// ── 折線圖：近 24 個月，月度聚合 + 平滑曲線 ──
+
+// 把逐筆變動紀錄聚合成「近 24 個月，每月一個點」
+// 規則：每月取「當月最後一筆」的淨值；該月沒有變動就沿用前一個有資料的月份（forward-fill）
+//      24 個月內完全沒有任何歷史資料的月份，往前抓不到值時，用「當前淨值」墊底
+function buildMonthlySeries() {
+  const now = new Date();
+  const months = [];
+  for (let i = 23; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.push({ y: d.getFullYear(), m: d.getMonth(), label: `${d.getFullYear()}/${d.getMonth()+1}` });
+  }
+  // 依時間排序，準備逐月掃描
+  const sorted = [...history].sort((a,b) => a.t - b.t);
+  let idx = 0;
+  let lastVal = sorted.length ? sorted[0].v : netWorth();
+  const series = months.map(mo => {
+    const monthEndTime = new Date(mo.y, mo.m + 1, 1).getTime() - 1; // 該月最後一毫秒
+    // 把所有落在這個月（含）之前、還沒用過的點都吃進來，取最後一筆當代表
+    while (idx < sorted.length && sorted[idx].t <= monthEndTime) {
+      lastVal = sorted[idx].v;
+      idx++;
+    }
+    return { ...mo, v: lastVal };
+  });
+  // 最後一個月（本月）用「當前即時淨值」覆蓋，讓線的終點永遠反映最新狀態
+  if (series.length) series[series.length-1].v = netWorth();
+  return series;
+}
+
+// Catmull-Rom → 平滑貝茲曲線路徑，讓折線圖絲滑不生硬
+function smoothPath(pts) {
+  if (pts.length < 2) return "";
+  if (pts.length === 2) return `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)} L${pts[1][0].toFixed(1)} ${pts[1][1].toFixed(1)}`;
+  let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i === 0 ? 0 : i - 1];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[i + 2 < pts.length ? i + 2 : i + 1];
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += ` C${c1x.toFixed(1)} ${c1y.toFixed(1)} ${c2x.toFixed(1)} ${c2y.toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+  }
+  return d;
+}
+
 function renderChart() {
   const svg=document.getElementById("sparkline");
-  const W=340,H=120,pad=8;
-  if(history.length<2){
+  const W=340,H=120,pad=10;
+
+  if (history.length===0) {
     svg.innerHTML=`<text x="${W/2}" y="${H/2}" fill="#4b515c" font-size="12" text-anchor="middle">調整資產後這裡會顯示走勢</text>`;
     document.getElementById("chartRange").textContent="—";
     return;
   }
-  const vals=history.map(h=>h.v);
+
+  const series = buildMonthlySeries();
+  const vals = series.map(s=>s.v);
   const min=Math.min(...vals), max=Math.max(...vals);
   const range=max-min||1;
-  const pts=history.map((h,i)=>{
-    const x=pad+(i/(history.length-1))*(W-pad*2);
-    const y=pad+(1-(h.v-min)/range)*(H-pad*2);
+  const n = series.length;
+  const pts = series.map((s,i)=>{
+    const x = pad + (i/(n-1)) * (W - pad*2);
+    const y = pad + (1-(s.v-min)/range) * (H - pad*2);
     return [x,y];
   });
-  const line=pts.map((p,i)=>(i?"L":"M")+p[0].toFixed(1)+" "+p[1].toFixed(1)).join(" ");
-  const area=line+` L${pts[pts.length-1][0].toFixed(1)} ${H-pad} L${pts[0][0].toFixed(1)} ${H-pad} Z`;
-  const up = vals[vals.length-1]>=vals[0];
+
+  const line = smoothPath(pts);
+  const last = pts[pts.length-1];
+  const area = line + ` L${last[0].toFixed(1)} ${H-pad} L${pts[0][0].toFixed(1)} ${H-pad} Z`;
+  const up = vals[vals.length-1] >= vals[0];
   const col = up ? "#3fb07a" : "#e8804a";
+
   svg.innerHTML=`
     <defs><linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="${col}" stop-opacity="0.28"/>
       <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
     </linearGradient></defs>
     <path d="${area}" fill="url(#grad)"/>
-    <path d="${line}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="${pts[pts.length-1][0].toFixed(1)}" cy="${pts[pts.length-1][1].toFixed(1)}" r="4" fill="${col}"/>`;
-  document.getElementById("chartRange").textContent = `${history.length} 筆變化`;
+    <path d="${line}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+      stroke-dasharray="800" stroke-dashoffset="800">
+      <animate attributeName="stroke-dashoffset" from="800" to="0" dur=".9s" fill="freeze" calcMode="spline" keySplines="0.34 1.2 0.4 1" keyTimes="0;1"/>
+    </path>
+    <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="4" fill="${col}">
+      <animate attributeName="r" values="0;5;4" dur=".6s" begin=".5s" fill="freeze"/>
+    </circle>`;
+  document.getElementById("chartRange").textContent = `${series[0].label} – ${series[n-1].label}`;
 }
 
 function pushHistory() {
   history.push({ v: netWorth(), t: Date.now() });
-  if (history.length>60) history.shift();
+  // 不再限制筆數：雲端可能已載入近 24 個月的完整資料，
+  // 若砍掉最舊的點會讓月折線圖前段月份失真。
 }
 
 // 資料變動後統一呼叫：記歷史 + 存雲端 + 關面板 + 重繪
@@ -838,20 +904,38 @@ async function refreshPrices(silent=false) {
 // ── 初始化 ──
 window.addEventListener("resize",()=>renderTreemap());
 
+// 幫任何 Promise 加逾時保護：超過時間就當作失敗，不再無限等待
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => {
+      console.warn(`${label} 逾時（${ms}ms），改用本地資料繼續`);
+      resolve(false);
+    }, ms))
+  ]);
+}
+
 async function boot() {
-  initSupabase();
-  if (cloudOn()) {
-    const status=document.getElementById("priceStatus");
-    if(status) status.textContent="從雲端載入中…";
-    await loadFromCloud();
-    const gotHistory = await loadNetWorthHistory();
-    // 雲端還沒有任何歷史點（例如第一次啟用同步）：補記目前這筆，讓折線圖有起點
-    if (!gotHistory || history.length===0) {
+  const status=document.getElementById("priceStatus");
+  try {
+    initSupabase();
+    if (cloudOn()) {
+      if(status) status.textContent="從雲端載入中…";
+      await withTimeout(loadFromCloud(), 8000, "資產載入");
+      const gotHistory = await withTimeout(loadNetWorthHistory(), 8000, "歷史載入");
+      // 雲端還沒有任何歷史點（例如第一次啟用同步）：補記目前這筆，讓折線圖有起點
+      if (!gotHistory || history.length===0) {
+        pushHistory();
+        saveNetWorthSnapshot(netWorth());
+      }
+    } else {
       pushHistory();
-      saveNetWorthSnapshot(netWorth());
     }
-  } else {
-    pushHistory();
+  } catch (e) {
+    // 任何未預期錯誤都不讓畫面卡死，改用目前手上有的資料（雲端失敗就用本地預設）繼續開啟
+    console.error("開機流程發生錯誤，改用本地資料:", e);
+    if (history.length===0) pushHistory();
+    if (status) status.textContent = "雲端連線異常，暫用本地資料";
   }
   renderAll(false);
   setTimeout(()=>renderTreemap(),50);
