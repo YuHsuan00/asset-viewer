@@ -20,6 +20,7 @@
     min-height: 100vh; position: relative;
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);
+    padding-bottom: calc(28px + env(safe-area-inset-bottom));
   }
   .wrap { padding: 0 16px; }               /* 左右安全邊距 */
   .topbar {
@@ -47,13 +48,22 @@
   #treemap-inner { position: relative; width: 100%; height: 100%; }
   .tile {
     position: absolute; padding: 3.5px; cursor: pointer;
+    touch-action: pan-y; /* 預設允許上下滑動頁面；拖曳啟動後改由 .dragging 鎖定 */
     transition: left .55s cubic-bezier(.34,1.15,.4,1), top .55s cubic-bezier(.34,1.15,.4,1),
                 width .55s cubic-bezier(.34,1.15,.4,1), height .55s cubic-bezier(.34,1.15,.4,1);
+  }
+  .tile.dragging {
+    touch-action: none;
+    cursor: grabbing;
+  }
+  .tile.dragging .tile-inner {
+    box-shadow: 0 14px 34px rgba(0,0,0,.45) !important;
+    transform: scale(1.045);
   }
   .tile-inner {
     width: 100%; height: 100%; border-radius: 14px;
     display: flex; flex-direction: column; justify-content: space-between;
-    padding: 12px; overflow: hidden; transition: box-shadow .3s;
+    padding: 12px; overflow: hidden; transition: box-shadow .3s, transform .15s ease;
   }
   .tile-name { font-weight: 700; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.28);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -177,11 +187,11 @@ const COINGECKO_IDS = {
 };
 
 let assets = [
-  { id:"line",  cat:"cash",   name:"Line Bank",  color:"#00c368", balance:250000 },
-  { id:"chang", cat:"cash",   name:"彰銀",       color:"#2ea56f", balance:132300 },
-  { id:"btc",   cat:"crypto", name:"比特幣",     color:"#f7931a", qty:0.04201, symbol:"BTC",  price:1996000 },
-  { id:"eth",   cat:"crypto", name:"以太幣",     color:"#a879f0", qty:0.1588,  symbol:"ETH",  price:56000 },
-  { id:"tw50",  cat:"stock",  name:"元大台灣50", color:"#5b8def", qty:175,     symbol:"0050", price:108 },
+  { id:"line",  cat:"cash",   name:"Line Bank",  color:"#00c368", balance:250000, order:0 },
+  { id:"chang", cat:"cash",   name:"彰銀",       color:"#2ea56f", balance:132300, order:1 },
+  { id:"btc",   cat:"crypto", name:"比特幣",     color:"#f7931a", qty:0.04201, symbol:"BTC",  price:1996000, order:0 },
+  { id:"eth",   cat:"crypto", name:"以太幣",     color:"#a879f0", qty:0.1588,  symbol:"ETH",  price:56000, order:1 },
+  { id:"tw50",  cat:"stock",  name:"元大台灣50", color:"#5b8def", qty:175,     symbol:"0050", price:108, order:0 },
 ];
 
 // 淨資產歷史（每次變動記一點）
@@ -212,8 +222,9 @@ async function loadFromCloud() {
     if (error) throw error;
     if (data && data.length) {
       // 雲端已經有資料：以雲端為準（多裝置同步的正常情況）
-      assets = data.map(r => ({
+      assets = data.map((r,i) => ({
         id: r.id, cat: r.cat, name: r.name, color: r.color,
+        order: r.sort_order!=null ? Number(r.sort_order) : i,
         ...(r.cat==="cash" ? { balance: Number(r.balance)||0 }
                            : { qty: Number(r.qty)||0, price: Number(r.price)||0, symbol: r.symbol||"" })
       }));
@@ -235,7 +246,8 @@ async function saveAssetToCloud(a) {
       balance: a.cat==="cash" ? a.balance : null,
       qty: a.cat!=="cash" ? a.qty : null,
       price: a.cat!=="cash" ? a.price : null,
-      symbol: a.symbol || null
+      symbol: a.symbol || null,
+      sort_order: a.order ?? 0
     });
   } catch(e) { console.warn("雲端儲存失敗:", e.message); }
 }
@@ -277,12 +289,13 @@ const valueOf = a => a.cat === "cash" ? a.balance : a.qty * a.price;
 const netWorth = () => assets.reduce((s,a)=>s+valueOf(a),0);
 
 // ── squarified treemap ──
-function layoutTreemap(items, x, y, w, h) {
+// preserveOrder=true 時不依數值重新排序，改用呼叫端給的順序（讓手動拖曳排序生效）
+function layoutTreemap(items, x, y, w, h, preserveOrder=false) {
   const total = items.reduce((s,it)=>s+it.value,0);
   if (total <= 0 || w <= 0 || h <= 0) return [];
   const nodes = [];
   let area = {x,y,w,h};
-  let remaining = [...items].sort((a,b)=>b.value-a.value);
+  let remaining = preserveOrder ? [...items] : [...items].sort((a,b)=>b.value-a.value);
   let remTotal = total;
   while (remaining.length) {
     const horizontal = area.w >= area.h;
@@ -349,9 +362,11 @@ function layoutGrouped(w, h) {
         x:gn.x, y:gn.y, w:gn.w, h:gn.h });
     } else {
       // 群組層不加 padding，直接在群組矩形內排 tile
+      // 依使用者拖曳排序的 order 欄位排列（而非單純依數值大小），preserveOrder=true 讓 layoutTreemap 不覆蓋順序
+      const sortedList = [...gn.list].sort((a,b)=>(a.order??0)-(b.order??0));
       const inner=layoutTreemap(
-        gn.list.map(a=>({id:a.id,value:valueOf(a),ref:a})),
-        gn.x, gn.y, gn.w, gn.h);
+        sortedList.map(a=>({id:a.id,value:valueOf(a),ref:a})),
+        gn.x, gn.y, gn.w, gn.h, true);
       all=all.concat(inner);
     }
   });
@@ -360,11 +375,15 @@ function layoutGrouped(w, h) {
 
 // ── 渲染 treemap ──
 let animatedNW = netWorth();
+let lastNodes = []; // 上一次渲染的方塊位置，供拖曳時判斷「拖到哪個方塊上」
+let draggingId = null; // 目前正在被拖曳的資產 id（null=沒有在拖）
+
 function renderTreemap() {
   const inner = document.getElementById("treemap-inner");
   const rect = inner.getBoundingClientRect();
   const W = rect.width, H = rect.height;
   const nodes = layoutGrouped(W, H);
+  lastNodes = nodes;
   const nw = netWorth();
   const existing = {};
   inner.querySelectorAll(".tile").forEach(el => existing[el.dataset.id] = el);
@@ -390,10 +409,14 @@ function renderTreemap() {
       el = document.createElement("div");
       el.className="tile"; el.dataset.id=n.id;
       el.innerHTML = `<div class="tile-inner"><div class="tile-name"></div><div class="tile-bottom"><div class="tile-pct"></div><div class="tile-val"></div></div></div>`;
-      el.addEventListener("click", ()=> a.isOther ? openOtherSheet(a) : openAdjust(a.id));
+      attachTileInteraction(el, a);
       inner.appendChild(el);
     }
-    el.style.left=n.x+"px"; el.style.top=n.y+"px"; el.style.width=n.w+"px"; el.style.height=n.h+"px";
+    // 正在被拖曳的方塊：位置由拖曳手勢直接控制，渲染迴圈不覆蓋 left/top，避免打架
+    if (n.id !== draggingId) {
+      el.style.left=n.x+"px"; el.style.top=n.y+"px";
+    }
+    el.style.width=n.w+"px"; el.style.height=n.h+"px";
 
     const innerEl = el.querySelector(".tile-inner");
     innerEl.style.background = a.isOther ? "#22252d" : `linear-gradient(145deg, ${a.color}, ${a.color}c4)`;
@@ -434,6 +457,109 @@ function renderTreemap() {
   });
   // 移除消失的
   Object.keys(existing).forEach(id=>{ if(!seen.has(id)) existing[id].remove(); });
+}
+
+// ── 方塊互動：輕點 = 開啟調整面板；長按 0.32s 後拖曳 = 調整同類別內的顯示順序 ──
+// 拖曳時其他方塊會依 squarified treemap 重新計算、平滑流動讓位（既有的 CSS transition 負責這段動畫）
+function attachTileInteraction(el, assetRef) {
+  const LONG_PRESS_MS = 320;
+  const MOVE_CANCEL_PX = 9; // 長按計時器觸發前，手指移動超過這個距離視為滑動頁面，取消拖曳
+
+  let timer = null;
+  let dragActive = false;
+  let startX=0, startY=0, startLeft=0, startTop=0;
+  let lastHoverId = null;
+  let movedAssets = new Set(); // 這次拖曳中被交換過順序、需要存回雲端的資產
+
+  function cleanup() {
+    clearTimeout(timer); timer=null;
+    dragActive = false;
+    draggingId = null;
+    el.classList.remove("dragging");
+    el.style.zIndex = "";
+    el.style.transition = "";
+    lastHoverId = null;
+  }
+
+  function onPointerMove(e) {
+    const a = assets.find(x=>x.id===assetRef.id);
+    if (!a) return cleanup();
+
+    if (!dragActive) {
+      // 尚未進入拖曳模式：若移動太多，視為滑動頁面，取消長按計時
+      const dx0 = e.clientX-startX, dy0=e.clientY-startY;
+      if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) { clearTimeout(timer); timer=null; }
+      return;
+    }
+
+    e.preventDefault();
+    const dx = e.clientX-startX, dy = e.clientY-startY;
+    const newLeft = startLeft+dx, newTop = startTop+dy;
+    el.style.left = newLeft+"px";
+    el.style.top = newTop+"px";
+
+    // 用拖曳方塊的中心點，判斷目前疊在同類別的哪個方塊上
+    const w = parseFloat(el.style.width), h = parseFloat(el.style.height);
+    const cx = newLeft + w/2, cy = newTop + h/2;
+    const hovered = lastNodes.find(n =>
+      n.id !== assetRef.id && n.ref && !n.ref.isOther && n.ref.cat === a.cat &&
+      cx >= n.x && cx <= n.x+n.w && cy >= n.y && cy <= n.y+n.h
+    );
+    if (hovered && hovered.id !== lastHoverId) {
+      const other = assets.find(x=>x.id===hovered.id);
+      if (other) {
+        const tmp = a.order ?? 0;
+        a.order = other.order ?? 0;
+        other.order = tmp;
+        movedAssets.add(a.id); movedAssets.add(other.id);
+        lastHoverId = hovered.id;
+        renderTreemap(); // 其他方塊依新順序平滑重新排列、讓位
+      }
+    }
+  }
+
+  function onPointerUp() {
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerUp);
+
+    if (!dragActive) {
+      // 沒有觸發拖曳（快速輕點）：視為一般點擊，開啟調整面板
+      clearTimeout(timer); timer=null;
+      assetRef.isOther ? openOtherSheet(assetRef) : openAdjust(assetRef.id);
+      return;
+    }
+
+    cleanup();
+    renderTreemap(); // 放開後，讓拖曳方塊也平滑歸位到最終計算出的格子
+    // 把這次拖曳中順序有變動的資產存回雲端
+    movedAssets.forEach(id => {
+      const a2 = assets.find(x=>x.id===id);
+      if (a2) saveAssetToCloud(a2);
+    });
+    movedAssets = new Set();
+  }
+
+  el.addEventListener("pointerdown", (e) => {
+    if (e.button !== undefined && e.button !== 0) return; // 只回應主要按鍵/單指
+    startX = e.clientX; startY = e.clientY;
+    startLeft = parseFloat(el.style.left)||0;
+    startTop = parseFloat(el.style.top)||0;
+    dragActive = false;
+
+    timer = setTimeout(() => {
+      if (assetRef.isOther) return; // 「其他」聚合方塊沒有單一順序概念，不支援拖曳
+      dragActive = true;
+      draggingId = assetRef.id;
+      el.classList.add("dragging");
+      el.style.zIndex = "40";
+      el.style.transition = "box-shadow .2s ease, transform .15s ease"; // 位置改用直接賦值，不做位移動畫，才能精準跟手指
+    }, LONG_PRESS_MS);
+
+    window.addEventListener("pointermove", onPointerMove, { passive:false });
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+  });
 }
 
 // ── 淨資產數字動畫 ──
@@ -766,10 +892,12 @@ function openAdd() {
       const id="a"+Date.now();
       const used=assets.map(a=>a.color);
       const color=CATEGORIES[cat].palette.find(c=>!used.includes(c))||CATEGORIES[cat].palette[0];
+      const sameCat = assets.filter(a=>a.cat===cat);
+      const nextOrder = sameCat.length ? Math.max(...sameCat.map(a=>a.order??0)) + 1 : 0;
       if(cat==="cash"){
-        assets.push({id,cat,name:nameEl.value.trim(),color,balance:Number(fields.querySelector("#fBal").value)});
+        assets.push({id,cat,name:nameEl.value.trim(),color,order:nextOrder,balance:Number(fields.querySelector("#fBal").value)});
       } else {
-        assets.push({id,cat,name:nameEl.value.trim(),color,
+        assets.push({id,cat,name:nameEl.value.trim(),color,order:nextOrder,
           symbol:(fields.querySelector("#fSym").value||nameEl.value).trim(),
           qty:Number(fields.querySelector("#fQty").value),
           price:Number(fields.querySelector("#fPrice").value)});
@@ -787,10 +915,9 @@ document.getElementById("refreshBtn").onclick=()=>refreshPrices(false);
 
 // ── 即時價 ──
 // 幣價：CoinGecko 公開 API（免金鑰、直接回台幣、有開 CORS，前端可直接抓）
-// 股價：證交所即時 API 不允許前端跨域，需等部署到 Vercel 後用 serverless 代理，
-//       這裡先留好開關與函式，上線後把 STOCK_API_READY 設 true 並填入你的代理網址。
-const STOCK_API_READY = false;
-const STOCK_PROXY_URL = "/api/twstock"; // 上 Vercel 後啟用
+// 股價：透過 Vercel serverless（api/twstock.js）代理證交所即時 API，繞過瀏覽器跨域限制
+const STOCK_API_READY = true;
+const STOCK_PROXY_URL = "/api/twstock";
 
 async function fetchCryptoPrices() {
   const cryptos = assets.filter(a => a.cat === "crypto");
@@ -851,24 +978,26 @@ async function fetchCryptoPrices() {
 }
 
 async function fetchStockPrices() {
-  if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true };
+  if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true, err:null };
   const stocks = assets.filter(a => a.cat === "stock");
-  if (!stocks.length) return { ok:0, fail:0 };
+  if (!stocks.length) return { ok:0, fail:0, err:null };
   const codes = stocks.map(a => a.symbol).join(",");
-  let ok=0, fail=0;
+  let ok=0, fail=0, err=null;
   try {
     const res = await fetch(`${STOCK_PROXY_URL}?codes=${encodeURIComponent(codes)}`);
-    if (!res.ok) throw new Error("HTTP "+res.status);
+    if (!res.ok) throw new Error("代理 HTTP "+res.status);
     const data = await res.json(); // 預期格式：{ "0050": 108.25, ... }
     stocks.forEach(a => {
       if (data[a.symbol]) { a.price = data[a.symbol]; ok++; }
       else fail++;
     });
+    if (fail>0 && ok===0) err = "證交所無回應資料（可能休市或代號錯誤）";
   } catch(e) {
     fail = stocks.length;
+    err = e.message;
     console.warn("股價抓取失敗:", e.message);
   }
-  return { ok, fail };
+  return { ok, fail, err };
 }
 
 let refreshing = false;
@@ -888,21 +1017,26 @@ async function refreshPrices(silent=false) {
   const mm = String(now.getMinutes()).padStart(2,"0");
   if (status) {
     const hasCrypto = assets.some(a => a.cat === "crypto");
-    if (!hasCrypto) {
-      status.textContent = `價格更新於 ${hh}:${mm}（尚無幣種）`;
+    const hasStock = assets.some(a => a.cat === "stock");
+    const totalOk = c.ok + s.ok;
+    const totalFail = c.fail + s.fail;
+    const nothingToFetch = !hasCrypto && !hasStock;
+
+    if (nothingToFetch) {
+      status.textContent = `價格更新於 ${hh}:${mm}（尚無幣種或股票）`;
       status.style.color = "#5b616e";
-    } else if (c.ok>0 && c.fail===0) {
+    } else if (totalOk>0 && totalFail===0) {
       status.textContent = `價格更新於 ${hh}:${mm}`;
       status.style.color = "#5b616e";
-    } else if (c.ok>0) {
-      status.textContent = `已更新 ${c.ok} 項，${c.fail} 項失敗`;
+    } else if (totalOk>0) {
+      status.textContent = `已更新 ${totalOk} 項，${totalFail} 項失敗`;
       status.style.color = "#e8804a";
     } else {
       // 全失敗：顯示原因，多半是 file:// 開啟或被限流
       const reason = c.err && /Failed to fetch|NetworkError|CORS/i.test(c.err)
         ? "無法連線（可能是用檔案直接開啟，需用網址開啟）"
-        : (c.err || "抓取失敗");
-      status.textContent = `幣價更新失敗：${reason}`;
+        : (c.err || s.err || "抓取失敗");
+      status.textContent = `價格更新失敗：${reason}`;
       status.style.color = "#e8804a";
     }
   }
