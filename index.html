@@ -607,12 +607,15 @@ function renderTreemap() {
     } else {
       // 直向堆疊（原本邏輯）：依面積分四級決定顯示多少內容
       innerEl.style.flexDirection = "column";
+      innerEl.style.alignItems = ""; // 重要：橫排模式(wideShort)會把這個設成 center，
+                                      // 這裡若不重設，殘留值在直向排版下會變成「水平置中」，就是文字跑到中間的成因
       innerEl.style.justifyContent = level>=3 ? "space-between" : "center";
       innerEl.style.padding = level<=1 ? "6px 7px" : "11px 12px";
       bottom.style.display = "block";
       bottom.style.flexDirection = "";
       bottom.style.alignItems = "";
       bottom.style.marginLeft = "";
+      bottom.style.width = "100%";
 
       // 名稱只在 L3 顯示（其他等級砍掉，優先留數字）
       // 「其他」方塊字級縮小，避免被裁
@@ -624,6 +627,7 @@ function renderTreemap() {
         nameEl.style.color = a.isOther ? "#c8ccd4" : "#fff";
         nameEl.style.flex = "";
         nameEl.style.minWidth = "";
+        nameEl.style.width = "100%";
       } else {
         nameEl.style.display="none";
       }
@@ -634,6 +638,7 @@ function renderTreemap() {
       pctEl.style.lineHeight = "1.1";
       pctEl.style.color = a.isOther?"#c8ccd4":"#fff";
       pctEl.style.textAlign = "left";
+      pctEl.style.width = "100%";
 
       // 金額：L3、L2 顯示，更小就砍
       valEl.style.display = level>=2 ? "block" : "none";
@@ -642,6 +647,7 @@ function renderTreemap() {
       valEl.style.lineHeight = "1.2";
       valEl.style.color = a.isOther?"#8a94a6":"rgba(255,255,255,.85)";
       valEl.style.textAlign = "left";
+      valEl.style.width = "100%";
     }
   });
   // 移除消失的
