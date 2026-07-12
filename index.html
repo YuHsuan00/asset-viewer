@@ -926,7 +926,7 @@ function renderChart() {
     <path d="${area}" fill="url(#grad)"/>
     <path d="${line}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
       stroke-dasharray="800" stroke-dashoffset="800">
-      <animate attributeName="stroke-dashoffset" from="800" to="0" dur=".9s" fill="freeze" calcMode="spline" keySplines="0.34 1.2 0.4 1" keyTimes="0;1"/>
+      <animate attributeName="stroke-dashoffset" from="800" to="0" dur=".9s" fill="freeze" calcMode="spline" keySplines="0.34 0.8 0.4 1" keyTimes="0;1"/>
     </path>
     <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="4" fill="${col}">
       <animate attributeName="r" values="0;5;4" dur=".6s" begin=".5s" fill="freeze"/>
@@ -946,9 +946,9 @@ async function commit(changedAsset, opts={}) {
   // 等雲端真的存完才關視窗/繼續，避免使用者存完立刻鎖螢幕、切走，
   // 導致背景中的網路請求被中斷、資料根本沒送到雲端（這是之前「新增資產後重開就不見」的成因）
   const tasks = [];
-  if (changedAsset && !opts.deleted) tasks.push(withTimeout(saveAssetToCloud(changedAsset), 6000, "資產儲存"));
-  if (opts.deleted && changedAsset) tasks.push(withTimeout(deleteAssetFromCloud(changedAsset.id), 6000, "資產刪除"));
-  tasks.push(withTimeout(saveNetWorthSnapshot(netWorth()), 6000, "淨值快照")); // 雲端也記一筆淨值快照，供跨裝置折線圖
+  if (changedAsset && !opts.deleted) tasks.push(withTimeout(saveAssetToCloud(changedAsset), 10000, "資產儲存"));
+  if (opts.deleted && changedAsset) tasks.push(withTimeout(deleteAssetFromCloud(changedAsset.id), 10000, "資產刪除"));
+  tasks.push(withTimeout(saveNetWorthSnapshot(netWorth()), 10000, "淨值快照")); // 雲端也記一筆淨值快照，供跨裝置折線圖
   await Promise.all(tasks);
   if (!opts.keepSheet) closeSheet();
   renderAll();
@@ -1330,9 +1330,9 @@ async function boot() {
     initSupabase();
     if (cloudOn()) {
       if(status) status.textContent="從雲端載入中…";
-      await withTimeout(loadFromCloud(), 8000, "資產載入");
-      await withTimeout(loadCategoryLayouts(), 8000, "版面載入");
-      const gotHistory = await withTimeout(loadNetWorthHistory(), 8000, "歷史載入");
+      await withTimeout(loadFromCloud(), 15000, "資產載入");
+      await withTimeout(loadCategoryLayouts(), 15000, "版面載入");
+      const gotHistory = await withTimeout(loadNetWorthHistory(), 15000, "歷史載入");
       // 雲端還沒有任何歷史點（例如第一次啟用同步）：補記目前這筆，讓折線圖有起點
       if (!gotHistory || history.length===0) {
         pushHistory();
