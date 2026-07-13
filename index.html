@@ -525,12 +525,28 @@ function renderTreemap() {
     seen.add(n.id);
     const pct = (n.value/nw)*100;
 
-    // 依方塊「形狀」決定排版，但不用猜的固定門檻——直接量測「名稱+比例」橫向排列
-    // 實際需要多寬，量出來真的放得下才用橫向排版（名稱靠左、數字靠右），
-    // 這樣不管是「Line Bank」還是「彰化銀行」這種寬度不同的名稱都能準確判斷。
+    // 依方塊「形狀」決定排版，兩種模式都用實際量測文字所需空間來判斷（不用猜的固定門檻）：
+    // 1. 先測「直向大字」模式（名稱在上、比例+金額往下疊）真正需要多少寬高
+    // 2. 直向放不下，再測「橫向排版」（名稱靠左、數字靠右）真正需要多寬
+    // 3. 兩種都放不下，才降級到依面積分級、砍資訊顯示
     const nameStr = a.isOther ? "其他" : a.name;
     const pctStr = pct.toFixed(1) + "%";
     const valStr = nf(n.value);
+
+    // 直向模式的字級（跟下面 L3 實際渲染用的字級要一致，量測才準）
+    const nameSizeCol = a.isOther ? 13 : 16;
+    const pctSizeCol = 21;
+    const valSizeCol = 11;
+    const nameWCol = textWidth(nameStr, 700, nameSizeCol);
+    const pctWCol = textWidth(pctStr, 800, pctSizeCol);
+    const valWCol = textWidth(valStr, 600, valSizeCol);
+    // 直向模式寬度：取三行裡最寬的那個 + 左右內距(12px*2)
+    const colNeededW = Math.max(nameWCol, pctWCol, valWCol) + 24;
+    // 直向模式高度：三行文字實際佔的高度（字級×行高）加總 + 上下內距(11px*2)
+    const colNeededH = (nameSizeCol*1.15) + (pctSizeCol*1.1) + (valSizeCol*1.2) + 22;
+    const qualifiesColumnL3 = n.w >= colNeededW && n.h >= colNeededH;
+
+    // 橫向排版的字級與量測（跟下面 wideShort 實際渲染用的字級一致）
     const nameSizeRow = a.isOther ? 14 : 16;
     const pctSizeRow = a.isOther ? 15 : 19;
     const nameW = textWidth(nameStr, 700, nameSizeRow);
@@ -539,12 +555,11 @@ function renderTreemap() {
     const rightColW = Math.max(pctW, valW); // 金額疊在比例下方，寬度取兩者較大值
     const rowNeededW = nameW + 10 /*名稱與數字間距*/ + rightColW + 32 /*左右內距*/;
 
-    const qualifiesColumnL3 = n.w>=88 && n.h>=62; // 直向堆疊也裝得下完整資訊時，優先用直向大字（更好看）
+    // 直向測過，放不下才測橫向；兩者都放不下才降級
     const wideShort = !qualifiesColumnL3 && n.w >= rowNeededW && n.h >= 34;
     const rowShowVal = wideShort && n.h >= 46; // 高度也夠兩行時，橫向排版才連金額一起顯示
 
-    const level = wideShort ? null :
-      (n.w>=88 && n.h>=62) ? 3 :
+    const level = (qualifiesColumnL3 || wideShort) ? null :
       (n.w>=56 && n.h>=42) ? 2 :
       (n.w>=40 && n.h>=26) ? 1 : 0;
 
@@ -604,12 +619,49 @@ function renderTreemap() {
       valEl.style.lineHeight = "1.2";
       valEl.style.color = a.isOther?"#8a94a6":"rgba(255,255,255,.85)";
       valEl.style.textAlign = "right";
-    } else {
-      // 直向堆疊（原本邏輯）：依面積分四級決定顯示多少內容
+
+    } else if (qualifiesColumnL3) {
+      // 直向大字：名稱在上、比例+金額往下疊，實測放得下才會走這條分支
       innerEl.style.flexDirection = "column";
       innerEl.style.alignItems = ""; // 重要：橫排模式(wideShort)會把這個設成 center，
                                       // 這裡若不重設，殘留值在直向排版下會變成「水平置中」，就是文字跑到中間的成因
-      innerEl.style.justifyContent = level>=3 ? "space-between" : "center";
+      innerEl.style.justifyContent = "space-between";
+      innerEl.style.padding = "11px 12px";
+      bottom.style.display = "block";
+      bottom.style.flexDirection = "";
+      bottom.style.alignItems = "";
+      bottom.style.marginLeft = "";
+      bottom.style.width = "100%";
+
+      nameEl.style.display="block";
+      nameEl.textContent = nameStr;
+      nameEl.style.fontSize = nameSizeCol+"px";
+      nameEl.style.lineHeight = "1.15";
+      nameEl.style.color = a.isOther ? "#c8ccd4" : "#fff";
+      nameEl.style.flex = "";
+      nameEl.style.minWidth = "";
+      nameEl.style.width = "100%";
+
+      pctEl.textContent = pctStr;
+      pctEl.style.fontSize = pctSizeCol+"px";
+      pctEl.style.lineHeight = "1.1";
+      pctEl.style.color = a.isOther?"#c8ccd4":"#fff";
+      pctEl.style.textAlign = "left";
+      pctEl.style.width = "100%";
+
+      valEl.style.display = "block";
+      valEl.textContent = valStr;
+      valEl.style.fontSize = valSizeCol+"px";
+      valEl.style.lineHeight = "1.2";
+      valEl.style.color = a.isOther?"#8a94a6":"rgba(255,255,255,.85)";
+      valEl.style.textAlign = "left";
+      valEl.style.width = "100%";
+
+    } else {
+      // 直向降級：兩種模式都放不下，才依面積分級、砍資訊顯示（level 只會是 2/1/0）
+      innerEl.style.flexDirection = "column";
+      innerEl.style.alignItems = ""; // 同上，避免殘留 center 造成文字置中
+      innerEl.style.justifyContent = "center";
       innerEl.style.padding = level<=1 ? "6px 7px" : "11px 12px";
       bottom.style.display = "block";
       bottom.style.flexDirection = "";
@@ -617,33 +669,20 @@ function renderTreemap() {
       bottom.style.marginLeft = "";
       bottom.style.width = "100%";
 
-      // 名稱只在 L3 顯示（其他等級砍掉，優先留數字）
-      // 「其他」方塊字級縮小，避免被裁
-      if (level>=3) {
-        nameEl.style.display="block";
-        nameEl.textContent = a.name;
-        nameEl.style.fontSize = (a.isOther?13:16)+"px";
-        nameEl.style.lineHeight = "1.15";
-        nameEl.style.color = a.isOther ? "#c8ccd4" : "#fff";
-        nameEl.style.flex = "";
-        nameEl.style.minWidth = "";
-        nameEl.style.width = "100%";
-      } else {
-        nameEl.style.display="none";
-      }
+      nameEl.style.display="none";
 
-      // 比例：所有等級都顯示（核心資訊）
+      // 比例：所有降級等級都顯示（核心資訊）
       pctEl.textContent = pct.toFixed(1)+"%";
-      pctEl.style.fontSize = (level===3?21 : level===2?16 : level===1?13 : 10)+"px";
+      pctEl.style.fontSize = (level===2?16 : level===1?13 : 10)+"px";
       pctEl.style.lineHeight = "1.1";
       pctEl.style.color = a.isOther?"#c8ccd4":"#fff";
       pctEl.style.textAlign = "left";
       pctEl.style.width = "100%";
 
-      // 金額：L3、L2 顯示，更小就砍
+      // 金額：L2 顯示，更小就砍
       valEl.style.display = level>=2 ? "block" : "none";
       valEl.textContent = nf(n.value);
-      valEl.style.fontSize = (level===3?11:10)+"px";
+      valEl.style.fontSize = "10px";
       valEl.style.lineHeight = "1.2";
       valEl.style.color = a.isOther?"#8a94a6":"rgba(255,255,255,.85)";
       valEl.style.textAlign = "left";
