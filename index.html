@@ -94,7 +94,20 @@
   .mode-btn.on { border-color: #5b8def; background: #5b8def22; color: #a9c3f5; }
   .mode-btn:active { transform: scale(.95); }
   .legend-group { margin-bottom: 16px; }
-  .legend-head { display: flex; justify-content: space-between; margin-bottom: 9px; }
+  .legend-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; }
+  .g-name-row { display: flex; align-items: center; gap: 8px; }
+  .theme-dot { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,.25); cursor: pointer; padding: 0; }
+  .theme-dot:active { transform: scale(.9); }
+  .theme-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 4px 0 6px; }
+  .theme-swatch { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; padding: 8px 4px; border-radius: 12px; border: 1.5px solid transparent; }
+  .theme-swatch.on { border-color: #ffffff55; background: #ffffff0c; }
+  .theme-swatch-strip { width: 44px; height: 44px; border-radius: 50%; overflow: hidden; display: grid; grid-template-columns: repeat(3,1fr); grid-template-rows: repeat(2,1fr); }
+  .theme-swatch-strip span { display: block; }
+  .theme-swatch-label { font-size: 12px; color: #a7adb8; }
+  .color-swatch-row { display: flex; gap: 10px; flex-wrap: wrap; margin: 4px 0 14px; }
+  .color-swatch { width: 30px; height: 30px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; padding: 0; }
+  .color-swatch.on { border-color: #fff; }
+  .color-swatch:active { transform: scale(.92); }
   .legend-head .g-name { font-size: 12px; color: #6b7280; letter-spacing: 1px; }
   .legend-head .g-val { font-size: 12px; color: #8a94a6; font-variant-numeric: tabular-nums; }
   .legend-items { display: flex; flex-wrap: wrap; gap: 8px 16px; }
@@ -194,11 +207,28 @@
 
 <script>
 // ── 類別定義 ──
-const CATEGORIES = {
-  cash:   { label: "銀行帳戶", unit: "",   qtyLabel: "",       priceLabel: "",          palette: ["#00c368","#2ea56f","#3fb07a","#5fc98d","#1f8f5a","#12b886"] },
-  crypto: { label: "虛擬貨幣", unit: "顆", qtyLabel: "持有數量", priceLabel: "現價 (TWD/顆)", palette: ["#f7931a","#a879f0","#e8804a","#c05fd9","#f0a93c","#b98cf5"] },
-  stock:  { label: "股票",     unit: "股", qtyLabel: "持有股數", priceLabel: "股價 (TWD/股)", palette: ["#5b8def","#4a9fe0","#6c7ce0","#3f7fd4","#7aa5f0","#5ac0e0"] },
+// 8 組精選主題色系，每組 6 階漸層。類別套用某個主題後，
+// 底下資產的顏色就從該主題的 6 階裡分配（不管是自動配色還是手動選色都限定在這個範圍內）。
+const THEMES = {
+  green:  { label:"綠", shades:["#00c368","#2ea56f","#3fb07a","#5fc98d","#1f8f5a","#12b886"] },
+  orange: { label:"橘", shades:["#f7931a","#e8804a","#f0a93c","#d9730d","#ff9f43","#c2660a"] },
+  purple: { label:"紫", shades:["#a879f0","#c05fd9","#b98cf5","#9b59e0","#8e44ad","#d291f0"] },
+  blue:   { label:"藍", shades:["#5b8def","#4a9fe0","#6c7ce0","#3f7fd4","#7aa5f0","#5ac0e0"] },
+  teal:   { label:"青", shades:["#14b8a6","#2dd4bf","#0d9488","#5eead4","#0f766e","#67e8f9"] },
+  red:    { label:"紅", shades:["#e05263","#f0687a","#c23f52","#f2909e","#a8324a","#ff7d8f"] },
+  gold:   { label:"金", shades:["#e8b923","#f2cb4c","#d4a017","#f5d76e","#c99a0a","#ffe082"] },
+  slate:  { label:"灰", shades:["#8a94a6","#6b7280","#9ca3af","#5b616e","#a7adb8","#78828f"] },
 };
+const THEME_ORDER = ["green","orange","purple","blue","teal","red","gold","slate"];
+
+const CATEGORIES = {
+  cash:   { label: "銀行帳戶", unit: "",   qtyLabel: "",       priceLabel: "",          theme: "green" },
+  crypto: { label: "虛擬貨幣", unit: "顆", qtyLabel: "持有數量", priceLabel: "現價 (TWD/顆)", theme: "orange" },
+  stock:  { label: "股票",     unit: "股", qtyLabel: "持有股數", priceLabel: "股價 (TWD/股)", theme: "blue" },
+};
+// 取得某類別目前主題的調色盤（6 階色階陣列）
+function getPalette(cat) { return THEMES[CATEGORIES[cat]?.theme || "green"].shades; }
+
 const GROUP_ORDER = ["cash","crypto","stock"];
 const OTHER_COLOR = "#4b515c";
 const THRESHOLD = 0.03; // 3% 以下併入「其他」
@@ -315,17 +345,25 @@ async function loadNetWorthHistory() {
 // 手動排版結構（拖曳決定的橫排/直排）存回雲端
 async function saveCategoryLayout(cat) {
   if (!cloudOn()) return;
-  try { await sb.from("category_layout").upsert({ cat, rows: categoryLayout[cat] || [] }); }
-  catch(e) { console.warn("版面儲存失敗:", e.message); }
+  try {
+    const payload = { cat, rows: categoryLayout[cat] || [] };
+    if (CATEGORIES[cat]) payload.theme = CATEGORIES[cat].theme; // 只有真實類別（非 __free__/__other__）才有主題
+    await sb.from("category_layout").upsert(payload);
+  } catch(e) { console.warn("版面儲存失敗:", e.message); }
 }
 
-// 讀取所有類別的手動排版結構
+// 讀取所有類別的手動排版結構（含主題色）
 async function loadCategoryLayouts() {
   if (!cloudOn()) return false;
   try {
-    const { data, error } = await sb.from("category_layout").select("cat,rows");
+    const { data, error } = await sb.from("category_layout").select("cat,rows,theme");
     if (error) throw error;
-    if (data) { data.forEach(r => { categoryLayout[r.cat] = r.rows || []; }); }
+    if (data) {
+      data.forEach(r => {
+        categoryLayout[r.cat] = r.rows || [];
+        if (CATEGORIES[r.cat] && r.theme && THEMES[r.theme]) CATEGORIES[r.cat].theme = r.theme;
+      });
+    }
     return true;
   } catch(e) { console.warn("版面載入失敗:", e.message); return false; }
 }
@@ -869,7 +907,14 @@ function renderLegend() {
     if(!list.length) return;
     const gv=list.reduce((s,a)=>s+valueOf(a),0);
     const g=document.createElement("div"); g.className="legend-group";
-    g.innerHTML=`<div class="legend-head"><span class="g-name">${CATEGORIES[cat].label}</span><span class="g-val">${nf(gv)}</span></div>`;
+    g.innerHTML=`<div class="legend-head">
+      <span class="g-name-row">
+        <button class="theme-dot" data-cat="${cat}" title="更換 ${CATEGORIES[cat].label} 主題色" style="background:${getPalette(cat)[0]}"></button>
+        <span class="g-name">${CATEGORIES[cat].label}</span>
+      </span>
+      <span class="g-val">${nf(gv)}</span>
+    </div>`;
+    g.querySelector(".theme-dot").addEventListener("click", ()=>openThemePicker(cat));
     const items=document.createElement("div"); items.className="legend-items";
     list.forEach(a=>{
       const it=document.createElement("div"); it.className="legend-item";
@@ -1058,11 +1103,25 @@ function openAdjust(id) {
       <div class="field"><div class="field-label">名稱</div>
         <input class="sm-input" id="eName" value="${a.name}"></div>
       ${editFields}
+      <div class="field"><div class="field-label">顏色（${CATEGORIES[a.cat].label}色系）</div>
+        <div class="color-swatch-row" id="colorRow">
+          ${getPalette(a.cat).map(c=>`<button class="color-swatch ${c===a.color?'on':''}" data-color="${c}" style="background:${c}"></button>`).join("")}
+        </div>
+      </div>
       <button class="primary-btn" id="saveBtn" style="background:${a.color};color:#fff">儲存變更</button>
     </div>
 
     <button class="del-btn" id="delBtn">刪除此資產</button>
   `, a.color);
+
+  let pendingColor = a.color;
+  sheet.querySelectorAll("#colorRow .color-swatch").forEach(sw=>{
+    sw.onclick = ()=>{
+      sheet.querySelectorAll("#colorRow .color-swatch").forEach(s=>s.classList.remove("on"));
+      sw.classList.add("on");
+      pendingColor = sw.dataset.color;
+    };
+  });
 
   // 分頁切換
   const paneQuick=sheet.querySelector("#paneQuick");
@@ -1107,6 +1166,7 @@ function openAdjust(id) {
       if(q!=="") a.qty=Math.max(0,Number(q));
       if(p!=="") a.price=Math.max(0,Number(p));
     }
+    a.color = pendingColor;
     saveBtnEl.disabled=true; saveBtnEl.textContent="儲存中…";
     await commit(a);
   };
@@ -1135,6 +1195,47 @@ function openOtherSheet(other) {
   sheet.querySelectorAll(".legend-item").forEach(r=>r.onclick=()=>openAdjust(r.dataset.id));
 }
 
+// ── 類別主題色：套用後，該類別底下所有資產依「原色階排名」對應到新主題的同排名色階 ──
+async function applyCategoryTheme(cat, themeName) {
+  const oldPalette = getPalette(cat);
+  CATEGORIES[cat].theme = themeName;
+  const newPalette = getPalette(cat);
+  const changedAssets = [];
+  assets.filter(a=>a.cat===cat).forEach(a=>{
+    const idx = oldPalette.indexOf(a.color);
+    // 只重新配色「用調色盤自動配色」的資產；曾手動選過調色盤以外顏色的（理論上不會發生，因為選色也限定在調色盤內）一律都在盤內，所以這裡一定找得到
+    if (idx>=0 && newPalette[idx] !== a.color) { a.color = newPalette[idx]; changedAssets.push(a); }
+  });
+  renderAll();
+  await saveCategoryLayout(cat);
+  await Promise.all(changedAssets.map(a=>saveAssetToCloud(a)));
+}
+
+function openThemePicker(cat) {
+  const current = CATEGORIES[cat].theme;
+  const sheet = showSheet(`
+    <div class="sheet-title">${CATEGORIES[cat].label} · 主題色</div>
+    <div class="sheet-desc">套用後，這個類別底下的資產都會換成新色系</div>
+    <div class="theme-grid">
+      ${THEME_ORDER.map(t=>{
+        const sh = THEMES[t].shades;
+        return `<button class="theme-swatch ${t===current?'on':''}" data-theme="${t}">
+          <span class="theme-swatch-strip">${sh.map(c=>`<span style="background:${c}"></span>`).join("")}</span>
+          <span class="theme-swatch-label">${THEMES[t].label}</span>
+        </button>`;
+      }).join("")}
+    </div>
+  `, getPalette(cat)[0]);
+  sheet.querySelectorAll(".theme-swatch").forEach(btn=>{
+    btn.onclick = async ()=>{
+      sheet.querySelectorAll(".theme-swatch").forEach(b=>b.classList.remove("on"));
+      btn.classList.add("on");
+      await applyCategoryTheme(cat, btn.dataset.theme);
+      closeSheet();
+    };
+  });
+}
+
 // ── 新增資產 ──
 function openAdd() {
   let cat=null;
@@ -1150,7 +1251,7 @@ function openAdd() {
   const fields=sheet.querySelector("#fields");
   sheet.querySelectorAll(".cat-btn").forEach(b=>b.onclick=()=>{
     cat=b.dataset.cat;
-    const pc=CATEGORIES[cat].palette[0];
+    const pc=getPalette(cat)[0];
     sheet.querySelectorAll(".cat-btn").forEach(x=>{x.style.border="1.5px solid #23252e";x.style.background="#1c1e26";x.style.color="#a7adb8";});
     b.style.border=`1.5px solid ${pc}`; b.style.background=pc+"22"; b.style.color="#fff";
     renderFields(cat);
@@ -1185,7 +1286,8 @@ function openAdd() {
     confirm.onclick=async ()=>{
       const id="a"+Date.now();
       const used=assets.map(a=>a.color);
-      const color=CATEGORIES[cat].palette.find(c=>!used.includes(c))||CATEGORIES[cat].palette[0];
+      const pal = getPalette(cat);
+      const color=pal.find(c=>!used.includes(c))||pal[0];
       const sameCat = assets.filter(a=>a.cat===cat);
       const nextOrder = sameCat.length ? Math.max(...sameCat.map(a=>a.order??0)) + 1 : 0;
       if(cat==="cash"){
