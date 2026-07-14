@@ -847,7 +847,14 @@ function attachTileInteraction(el, assetRef) {
     if (!dragActive) {
       // 沒有觸發拖曳（快速輕點）：視為一般點擊，開啟調整面板
       clearTimeout(timer); timer=null;
-      assetRef.isOther ? openOtherSheet(assetRef) : openAdjust(assetRef.id);
+      if (assetRef.isOther) {
+        // 「其他」方塊每次渲染都會產生全新的 members 清單，這裡的 assetRef 是建立當下綁定的閉包、
+        // 可能是舊資料；改成即時去 lastNodes（每次渲染都會更新）撈最新的一份，避免點開內容過期
+        const latest = lastNodes.find(n=>n.id==="__other__");
+        openOtherSheet(latest ? latest.ref : assetRef);
+      } else {
+        openAdjust(assetRef.id);
+      }
       return;
     }
 
