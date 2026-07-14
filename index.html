@@ -108,6 +108,9 @@
   .color-swatch { width: 30px; height: 30px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; padding: 0; }
   .color-swatch.on { border-color: #fff; }
   .color-swatch:active { transform: scale(.92); }
+  .target-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+  .target-btn { display: flex; align-items: center; gap: 8px; border: 1.5px solid #23252e; background: #16181f; color: #a7adb8; border-radius: 12px; padding: 9px 13px; font-size: 14px; cursor: pointer; transition: all .12s; }
+  .target-btn:active { transform: scale(.96); }
   .legend-head .g-name { font-size: 12px; color: #6b7280; letter-spacing: 1px; }
   .legend-head .g-val { font-size: 12px; color: #8a94a6; font-variant-numeric: tabular-nums; }
   .legend-items { display: flex; flex-wrap: wrap; gap: 8px 16px; }
@@ -1038,6 +1041,19 @@ async function commit(changedAsset, opts={}) {
   renderAll();
 }
 
+// 資產互轉專用：一次存兩邊資產（From 扣、To 加），只記一筆歷史快照，避免 commit() 呼叫兩次造成重複記錄
+async function commitTransfer(fromAsset, toAsset) {
+  pushHistory();
+  const tasks = [
+    withTimeout(saveAssetToCloud(fromAsset), 10000, "轉出來源"),
+    withTimeout(saveAssetToCloud(toAsset), 10000, "轉出目標"),
+    withTimeout(saveNetWorthSnapshot(netWorth()), 10000, "淨值快照"),
+  ];
+  await Promise.all(tasks);
+  closeSheet();
+  renderAll();
+}
+
 // ── 全部重繪 ──
 function renderAll(animate=true) {
   renderTreemap(); renderLegend(); renderChart();
@@ -1086,6 +1102,7 @@ function openAdjust(id) {
     <div class="seg-row">
       <button class="seg-btn on" id="segQuick">快速增減</button>
       <button class="seg-btn" id="segEdit">編輯內容</button>
+      <button class="seg-btn" id="segTransfer">轉出</button>
     </div>
 
     <div id="paneQuick">
@@ -1111,6 +1128,23 @@ function openAdjust(id) {
       <button class="primary-btn" id="saveBtn" style="background:${a.color};color:#fff">儲存變更</button>
     </div>
 
+    <div id="paneTransfer" style="display:none">
+      <div class="field">
+        <div class="field-label">從「${a.name}」轉出至</div>
+        <div class="target-list" id="transferTargetList"></div>
+        ${assets.length<=1?`<div class="note-sm">還沒有其他資產可以轉入，先新增一個吧</div>`:""}
+      </div>
+      <div class="field">
+        <div class="field-label">從「${a.name}」扣除（${isCash?"金額":unit}）</div>
+        <input class="sm-input" id="tFrom" type="number" inputmode="${isCash?"numeric":"decimal"}" placeholder="0">
+      </div>
+      <div class="field" id="tToField" style="display:none">
+        <div class="field-label" id="tToLabel">轉入數量</div>
+        <input class="sm-input" id="tTo" type="number" inputmode="decimal" placeholder="0">
+      </div>
+      <button class="primary-btn" id="transferBtn" disabled style="background:${a.color};color:#fff">確認轉出</button>
+    </div>
+
     <button class="del-btn" id="delBtn">刪除此資產</button>
   `, a.color);
 
@@ -1123,13 +1157,73 @@ function openAdjust(id) {
     };
   });
 
-  // 分頁切換
+  // 分頁切換（三分頁通用）
   const paneQuick=sheet.querySelector("#paneQuick");
   const paneEdit=sheet.querySelector("#paneEdit");
+  const paneTransfer=sheet.querySelector("#paneTransfer");
   const segQuick=sheet.querySelector("#segQuick");
   const segEdit=sheet.querySelector("#segEdit");
-  segQuick.onclick=()=>{ segQuick.classList.add("on"); segEdit.classList.remove("on"); paneQuick.style.display="block"; paneEdit.style.display="none"; };
-  segEdit.onclick=()=>{ segEdit.classList.add("on"); segQuick.classList.remove("on"); paneEdit.style.display="block"; paneQuick.style.display="none"; };
+  const segTransfer=sheet.querySelector("#segTransfer");
+  const tabs = [["segQuick",segQuick,paneQuick], ["segEdit",segEdit,paneEdit], ["segTransfer",segTransfer,paneTransfer]];
+  function switchTab(activeBtn) {
+    tabs.forEach(([id,btn,pane])=>{
+      const on = btn===activeBtn;
+      btn.classList.toggle("on", on);
+      pane.style.display = on ? "block" : "none";
+    });
+  }
+  segQuick.onclick=()=>switchTab(segQuick);
+  segEdit.onclick=()=>switchTab(segEdit);
+  segTransfer.onclick=()=>switchTab(segTransfer);
+
+  // ── 轉出：從這個資產扣一點、轉去另一個資產加一點，兩邊金額分別手動輸入 ──
+  let transferTarget = null;
+  const transferTargetList = sheet.querySelector("#transferTargetList");
+  const tFrom = sheet.querySelector("#tFrom");
+  const tTo = sheet.querySelector("#tTo");
+  const tToField = sheet.querySelector("#tToField");
+  const tToLabel = sheet.querySelector("#tToLabel");
+  const transferBtn = sheet.querySelector("#transferBtn");
+
+  assets.filter(x=>x.id!==id).forEach(other=>{
+    const btn=document.createElement("button");
+    btn.className="target-btn";
+    btn.innerHTML=`<span class="swatch" style="background:${other.color}"></span><span>${other.name}</span>`;
+    btn.onclick=()=>{
+      transferTarget = other;
+      transferTargetList.querySelectorAll(".target-btn").forEach(b=>{
+        b.style.borderColor=""; b.style.background=""; b.style.color="";
+      });
+      btn.style.borderColor = other.color;
+      btn.style.background = other.color+"22";
+      btn.style.color = "#fff";
+      const otherIsCash = other.cat==="cash";
+      const otherUnit = otherIsCash ? "金額" : CATEGORIES[other.cat].unit;
+      tToLabel.textContent = `轉入「${other.name}」數量（${otherUnit}）`;
+      tTo.setAttribute("inputmode", otherIsCash ? "numeric" : "decimal");
+      tToField.style.display = "block";
+      checkTransferReady();
+    };
+    transferTargetList.appendChild(btn);
+  });
+
+  function checkTransferReady(){
+    transferBtn.disabled = !(transferTarget && tFrom.value && Number(tFrom.value)>0 && tTo.value && Number(tTo.value)>0);
+  }
+  tFrom.oninput=()=>{ if(isCash) tFrom.value=tFrom.value.replace(/[^\d]/g,""); checkTransferReady(); };
+  tTo.oninput=()=>{ checkTransferReady(); };
+
+  transferBtn.onclick=async ()=>{
+    const fromAmt=Number(tFrom.value), toAmt=Number(tTo.value);
+    if(!transferTarget || !fromAmt || fromAmt<=0 || !toAmt || toAmt<=0) return;
+    if(isCash) a.balance=Math.max(0,a.balance-fromAmt);
+    else a.qty=Math.max(0,+(a.qty-fromAmt).toFixed(8));
+    const tgt = transferTarget;
+    if(tgt.cat==="cash") tgt.balance=(tgt.balance||0)+toAmt;
+    else tgt.qty=+((tgt.qty||0)+toAmt).toFixed(8);
+    transferBtn.disabled=true; transferBtn.textContent="轉出中…";
+    await commitTransfer(a, tgt);
+  };
 
   // ── 快速增減 ──
   const amt=sheet.querySelector("#amt");
