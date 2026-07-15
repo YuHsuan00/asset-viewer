@@ -111,6 +111,10 @@
   .target-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
   .target-btn { display: flex; align-items: center; gap: 8px; border: 1.5px solid #23252e; background: #16181f; color: #a7adb8; border-radius: 12px; padding: 9px 13px; font-size: 14px; cursor: pointer; transition: all .12s; }
   .target-btn:active { transform: scale(.96); }
+  .day-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 4px; }
+  .day-btn { aspect-ratio: 1; border: 1.5px solid #23252e; background: #16181f; color: #a7adb8; border-radius: 9px; font-size: 13px; font-variant-numeric: tabular-nums; cursor: pointer; transition: all .12s; }
+  .day-btn.on { border-color: #5b8def; background: #5b8def33; color: #fff; font-weight: 700; }
+  .day-btn:active { transform: scale(.92); }
   .legend-head .g-name { font-size: 12px; color: #6b7280; letter-spacing: 1px; }
   .legend-head .g-val { font-size: 12px; color: #8a94a6; font-variant-numeric: tabular-nums; }
   .legend-items { display: flex; flex-wrap: wrap; gap: 8px 16px; }
@@ -370,6 +374,37 @@ async function loadCategoryLayouts() {
     }
     return true;
   } catch(e) { console.warn("版面載入失敗:", e.message); return false; }
+}
+
+// ── 定期定額 ──
+let recurringRules = [];
+
+async function loadRecurringRules() {
+  if (!cloudOn()) return false;
+  try {
+    const { data, error } = await sb.from("recurring_transfers").select("*").order("created_at",{ascending:true});
+    if (error) throw error;
+    recurringRules = data || [];
+    return true;
+  } catch(e) { console.warn("定期定額載入失敗:", e.message); return false; }
+}
+
+async function saveRecurringRule(rule) {
+  if (!cloudOn()) return;
+  try {
+    await sb.from("recurring_transfers").upsert({
+      id: rule.id, from_id: rule.from_id, to_id: rule.to_id,
+      from_amount: rule.from_amount, to_amount: rule.to_amount,
+      days_of_month: rule.days_of_month, active: rule.active,
+      last_run_date: rule.last_run_date || null,
+    });
+  } catch(e) { console.warn("定期定額儲存失敗:", e.message); }
+}
+
+async function deleteRecurringRule(id) {
+  if (!cloudOn()) return;
+  try { await sb.from("recurring_transfers").delete().eq("id", id); }
+  catch(e) { console.warn("定期定額刪除失敗:", e.message); }
 }
 
 const nf = n => Math.round(n).toLocaleString();
@@ -1357,6 +1392,7 @@ function openAdd() {
     <div class="sheet-desc">先選類別，再填內容</div>
     <div class="cat-row">
       ${GROUP_ORDER.map(k=>`<button class="cat-btn" data-cat="${k}">${CATEGORIES[k].label}</button>`).join("")}
+      <button class="cat-btn" data-cat="__recurring__">定期定額</button>
     </div>
     <div id="fields"></div>
   `, "#5b8def");
@@ -1364,10 +1400,10 @@ function openAdd() {
   const fields=sheet.querySelector("#fields");
   sheet.querySelectorAll(".cat-btn").forEach(b=>b.onclick=()=>{
     cat=b.dataset.cat;
-    const pc=getPalette(cat)[0];
+    const pc = cat==="__recurring__" ? "#5b8def" : getPalette(cat)[0];
     sheet.querySelectorAll(".cat-btn").forEach(x=>{x.style.border="1.5px solid #23252e";x.style.background="#1c1e26";x.style.color="#a7adb8";});
     b.style.border=`1.5px solid ${pc}`; b.style.background=pc+"22"; b.style.color="#fff";
-    renderFields(cat);
+    if (cat==="__recurring__") renderRecurringPane(); else renderFields(cat);
   });
 
   function renderFields(cat) {
@@ -1420,6 +1456,150 @@ function openAdd() {
       await commit(newA); // 等確實存進雲端才關視窗，避免存到一半被中斷、下次打開就不見
       // 幣種、股票新增後順手抓一次即時價
       if (cat==="crypto" || cat==="stock_tw" || cat==="stock_us") refreshPrices(true);
+    };
+  }
+
+  // ── 定期定額：列出現有規則（可暫停/刪除）＋ 新增規則表單 ──
+  function renderRecurringPane() {
+    fields.innerHTML = `
+      <div class="expand-note">
+        <div class="sheet-desc" style="margin-top:-4px">到了設定的日期會自動從 A 轉一筆到 B（伺服器每天自動執行，開 App 時也會補跑一次沒執行到的，雙重保險）</div>
+        <div id="ruleList"></div>
+        <button class="primary-btn" id="newRuleBtn" style="background:#5b8def;margin-top:6px">＋ 新增規則</button>
+        <div id="ruleForm" style="display:none; margin-top:16px;">
+          <div class="field"><div class="field-label">從哪個資產扣</div><div class="target-list" id="ruleFromList"></div></div>
+          <div class="field"><div class="field-label">轉去哪個資產</div><div class="target-list" id="ruleToList"></div></div>
+          <div class="field"><div class="field-label">每月哪幾天執行（可複選）</div><div class="day-grid" id="dayGrid"></div></div>
+          <div class="field"><div class="field-label" id="ruleFromLabel">從來源扣除數量</div><input class="sm-input" id="ruleFromAmt" type="number" inputmode="decimal" placeholder="0"></div>
+          <div class="field"><div class="field-label" id="ruleToLabel">轉入目標數量</div><input class="sm-input" id="ruleToAmt" type="number" inputmode="decimal" placeholder="0"></div>
+          <button class="primary-btn" id="ruleSaveBtn" disabled style="background:#5b8def">儲存規則</button>
+        </div>
+      </div>
+    `;
+
+    const ruleListEl = fields.querySelector("#ruleList");
+    const newRuleBtn = fields.querySelector("#newRuleBtn");
+    const ruleForm = fields.querySelector("#ruleForm");
+    const ruleFromList = fields.querySelector("#ruleFromList");
+    const ruleToList = fields.querySelector("#ruleToList");
+    const dayGrid = fields.querySelector("#dayGrid");
+    const ruleFromAmt = fields.querySelector("#ruleFromAmt");
+    const ruleToAmt = fields.querySelector("#ruleToAmt");
+    const ruleFromLabel = fields.querySelector("#ruleFromLabel");
+    const ruleToLabel = fields.querySelector("#ruleToLabel");
+    const ruleSaveBtn = fields.querySelector("#ruleSaveBtn");
+
+    let selFrom=null, selTo=null, selDays=new Set();
+
+    function renderRuleList() {
+      if (!recurringRules.length) {
+        ruleListEl.innerHTML = `<div class="note-sm" style="margin-bottom:10px">還沒有設定任何定期定額規則</div>`;
+        return;
+      }
+      ruleListEl.innerHTML = recurringRules.map(r=>{
+        const from = assets.find(a=>a.id===r.from_id);
+        const to = assets.find(a=>a.id===r.to_id);
+        const fromName = from ? from.name : "(已刪除)";
+        const toName = to ? to.name : "(已刪除)";
+        const daysTxt = (r.days_of_month||[]).slice().sort((a,b)=>a-b).map(d=>d+"號").join("、");
+        return `<div class="rule-item" data-id="${r.id}" style="border:1.5px solid #23252e;border-radius:12px;padding:12px 14px;margin-bottom:8px;${r.active?'':'opacity:.5'}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span style="font-size:14px;font-weight:600;color:#e8eaed">${fromName} → ${toName}</span>
+            <span style="font-size:11px;color:${r.active?'#3fb07a':'#6b7280'}">${r.active?'啟用中':'已暫停'}</span>
+          </div>
+          <div style="font-size:12px;color:#8a94a6">每月 ${daysTxt}・扣 ${r.from_amount}・轉入 ${r.to_amount}</div>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button class="quick-btn rule-toggle" style="flex:1">${r.active?'暫停':'恢復'}</button>
+            <button class="quick-btn rule-delete" style="flex:1;color:#d9645a">刪除</button>
+          </div>
+        </div>`;
+      }).join("");
+
+      ruleListEl.querySelectorAll(".rule-item").forEach(item=>{
+        const id = item.dataset.id;
+        const rule = recurringRules.find(r=>r.id===id);
+        item.querySelector(".rule-toggle").onclick=async ()=>{
+          rule.active = !rule.active;
+          await saveRecurringRule(rule);
+          renderRuleList();
+        };
+        item.querySelector(".rule-delete").onclick=async ()=>{
+          recurringRules = recurringRules.filter(r=>r.id!==id);
+          await deleteRecurringRule(id);
+          renderRuleList();
+        };
+      });
+    }
+    renderRuleList();
+
+    function buildAssetList(container, onPick) {
+      container.innerHTML = "";
+      assets.forEach(a=>{
+        const btn=document.createElement("button");
+        btn.className="target-btn";
+        btn.innerHTML=`<span class="swatch" style="background:${a.color}"></span><span>${a.name}</span>`;
+        btn.onclick=()=>{
+          container.querySelectorAll(".target-btn").forEach(b=>{b.style.borderColor="";b.style.background="";b.style.color="";});
+          btn.style.borderColor=a.color; btn.style.background=a.color+"22"; btn.style.color="#fff";
+          onPick(a);
+        };
+        container.appendChild(btn);
+      });
+    }
+
+    function buildDayGrid() {
+      dayGrid.innerHTML = "";
+      for (let d=1; d<=31; d++) {
+        const btn=document.createElement("button");
+        btn.type="button"; btn.className="day-btn"; btn.textContent=d;
+        btn.onclick=()=>{
+          if (selDays.has(d)) { selDays.delete(d); btn.classList.remove("on"); }
+          else { selDays.add(d); btn.classList.add("on"); }
+          check();
+        };
+        dayGrid.appendChild(btn);
+      }
+    }
+
+    function updateLabels() {
+      if (selFrom) ruleFromLabel.textContent = `從「${selFrom.name}」扣除（${selFrom.cat==="cash"?"金額":CATEGORIES[selFrom.cat].unit}）`;
+      if (selTo) ruleToLabel.textContent = `轉入「${selTo.name}」數量（${selTo.cat==="cash"?"金額":CATEGORIES[selTo.cat].unit}）`;
+    }
+
+    function check() {
+      ruleSaveBtn.disabled = !(selFrom && selTo && selFrom!==selTo && selDays.size>0 &&
+        ruleFromAmt.value && Number(ruleFromAmt.value)>0 && ruleToAmt.value && Number(ruleToAmt.value)>0);
+    }
+    ruleFromAmt.oninput=check;
+    ruleToAmt.oninput=check;
+
+    newRuleBtn.onclick=()=>{
+      const showing = ruleForm.style.display!=="none";
+      if (showing) { ruleForm.style.display="none"; return; }
+      selFrom=null; selTo=null; selDays=new Set();
+      ruleFromAmt.value=""; ruleToAmt.value="";
+      ruleFromLabel.textContent="從來源扣除數量";
+      ruleToLabel.textContent="轉入目標數量";
+      ruleForm.style.display="block";
+      buildAssetList(ruleFromList, (a)=>{ selFrom=a; updateLabels(); check(); });
+      buildAssetList(ruleToList, (a)=>{ selTo=a; updateLabels(); check(); });
+      buildDayGrid();
+      check();
+    };
+
+    ruleSaveBtn.onclick=async ()=>{
+      const rule = {
+        id: "r"+Date.now(),
+        from_id: selFrom.id, to_id: selTo.id,
+        from_amount: Number(ruleFromAmt.value), to_amount: Number(ruleToAmt.value),
+        days_of_month: Array.from(selDays).sort((a,b)=>a-b),
+        active: true, last_run_date: null,
+      };
+      ruleSaveBtn.disabled=true; ruleSaveBtn.textContent="儲存中…";
+      recurringRules.push(rule);
+      await saveRecurringRule(rule);
+      ruleForm.style.display="none";
+      renderRuleList();
     };
   }
 }
@@ -1623,6 +1803,56 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
+// YYYY-MM-DD 格式（本地時區），用來跟 last_run_date 比對
+function dateStr(d) {
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,"0"), dd=String(d.getDate()).padStart(2,"0");
+  return `${y}-${m}-${dd}`;
+}
+function addDays(d, n) { const r=new Date(d); r.setDate(r.getDate()+n); return r; }
+
+// 執行一次定期定額的單一次扣款（From 扣、To 加）
+function applyRecurringOccurrence(rule, from, to) {
+  if (from.cat==="cash") from.balance = Math.max(0, (from.balance||0)-rule.from_amount);
+  else from.qty = Math.max(0, +((from.qty||0)-rule.from_amount).toFixed(8));
+  if (to.cat==="cash") to.balance = (to.balance||0)+rule.to_amount;
+  else to.qty = +((to.qty||0)+rule.to_amount).toFixed(8);
+}
+
+// 開 App 時補執行：檢查每條啟用中的規則，把「上次執行日」到「今天」之間錯過的日子都補跑一次。
+// 這是方案 A（保險機制）——就算 Vercel Cron 那天沒有成功觸發，開 App 時還是會補上，不會漏掉。
+async function runDueRecurringRules() {
+  if (!recurringRules.length) return;
+  const today = new Date();
+  let anyExecuted = false;
+
+  for (const rule of recurringRules) {
+    if (!rule.active) continue;
+    const from = assets.find(a=>a.id===rule.from_id);
+    const to = assets.find(a=>a.id===rule.to_id);
+    if (!from || !to) continue; // 來源或目標資產已刪除，規則失效跳過
+
+    let cursor = rule.last_run_date ? addDays(new Date(rule.last_run_date+"T00:00:00"), 1)
+                                     : new Date(rule.created_at || today);
+    let safety = 0; // 防呆：最多往前補 400 天，避免規則資料異常時無窮迴圈
+    while (cursor <= today && safety < 400) {
+      if ((rule.days_of_month||[]).includes(cursor.getDate())) {
+        applyRecurringOccurrence(rule, from, to);
+        rule.last_run_date = dateStr(cursor);
+        anyExecuted = true;
+      }
+      cursor = addDays(cursor, 1);
+      safety++;
+    }
+  }
+
+  if (anyExecuted) {
+    await Promise.all(recurringRules.map(r=>saveRecurringRule(r)));
+    await Promise.all(assets.map(a=>saveAssetToCloud(a))); // 圖方便：全部存一次，避免漏存被改到的資產
+    pushHistory();
+    await saveNetWorthSnapshot(netWorth());
+  }
+}
+
 async function boot() {
   const status=document.getElementById("priceStatus");
   try {
@@ -1631,6 +1861,8 @@ async function boot() {
       if(status) status.textContent="從雲端載入中…";
       await withTimeout(loadFromCloud(), 15000, "資產載入");
       await withTimeout(loadCategoryLayouts(), 15000, "版面載入");
+      await withTimeout(loadRecurringRules(), 15000, "定期定額載入");
+      await withTimeout(runDueRecurringRules(), 15000, "定期定額補執行");
       const gotHistory = await withTimeout(loadNetWorthHistory(), 15000, "歷史載入");
       // 雲端還沒有任何歷史點（例如第一次啟用同步）：補記目前這筆，讓折線圖有起點
       if (!gotHistory || history.length===0) {
