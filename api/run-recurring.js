@@ -43,6 +43,16 @@ export default async function handler(req, res) {
       if (!days.includes(todayDay)) continue;
       if (rule.last_run_date === todayStr) continue; // 快速跳過：明顯今天已經跑過的，省一次 API 呼叫
 
+      const from = assetMap[rule.from_id];
+      const to = assetMap[rule.to_id];
+      if (!from || !to) continue; // 來源或目標資產已被刪除，規則失效跳過
+
+      // 固定投入金額（台幣），兩邊各自用「執行當下」的即時價換算成要扣/加多少數量。
+      // 價格還沒抓到就不要去搶執行權，避免白白浪費這次機會，之後補執行時（Cron 隔天或使用者開 App）會再重試。
+      const fromUnitPrice = from.cat === "cash" ? 1 : Number(from.price || 0);
+      const toUnitPrice = to.cat === "cash" ? 1 : Number(to.price || 0);
+      if (!fromUnitPrice || !toUnitPrice) continue;
+
       // ── 原子性搶佔：用「條件式更新」讓資料庫自己保證同一天只有一個人搶得到執行權 ──
       // 條件是「last_run_date 還不是今天（或從沒執行過）」才准許更新成今天；
       // 搶輸的人（不管是 Cron 還是使用者開 App 補跑）會被 where 條件擋下，回傳空陣列，代表這次直接放棄不執行。
@@ -58,18 +68,18 @@ export default async function handler(req, res) {
       const claimed = await claimRes.json();
       if (!Array.isArray(claimed) || claimed.length === 0) continue; // 搶輸了（已經被搶走），放棄這次執行
 
-      const from = assetMap[rule.from_id];
-      const to = assetMap[rule.to_id];
-      if (!from || !to) continue; // 來源或目標資產已被刪除，規則失效跳過（執行權已搶到但沒有資產可動，等同放棄）
+      const amountTwd = Number(rule.amount_twd);
+      const fromDelta = amountTwd / fromUnitPrice;
+      const toDelta = amountTwd / toUnitPrice;
 
       const fromIsCash = from.cat === "cash";
       const toIsCash = to.cat === "cash";
       const newFromVal = fromIsCash
-        ? Math.max(0, Number(from.balance || 0) - Number(rule.from_amount))
-        : Math.max(0, +((Number(from.qty || 0) - Number(rule.from_amount)).toFixed(8)));
+        ? Math.max(0, Number(from.balance || 0) - fromDelta)
+        : Math.max(0, +((Number(from.qty || 0) - fromDelta).toFixed(8)));
       const newToVal = toIsCash
-        ? Number(to.balance || 0) + Number(rule.to_amount)
-        : +((Number(to.qty || 0) + Number(rule.to_amount)).toFixed(8));
+        ? Number(to.balance || 0) + toDelta
+        : +((Number(to.qty || 0) + toDelta).toFixed(8));
 
       const fromPatch = fromIsCash ? { balance: newFromVal } : { qty: newFromVal };
       const toPatch = toIsCash ? { balance: newToVal } : { qty: newToVal };
