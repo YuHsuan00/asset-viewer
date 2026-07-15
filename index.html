@@ -154,8 +154,8 @@
 
   .sheet-title { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
   .sheet-desc { font-size: 13px; color: #6b7280; margin-bottom: 20px; }
-  .cat-row { display: flex; gap: 8px; margin-bottom: 22px; }
-  .cat-btn { flex: 1; border: 1.5px solid #23252e; background: #1c1e26; color: #a7adb8; border-radius: 12px; padding: 14px 0; font-size: 14px; font-weight: 700; cursor: pointer; transition: all .15s; }
+  .cat-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
+  .cat-btn { flex: 1 1 calc(50% - 4px); min-width: 80px; border: 1.5px solid #23252e; background: #1c1e26; color: #a7adb8; border-radius: 12px; padding: 14px 0; font-size: 14px; font-weight: 700; cursor: pointer; transition: all .15s; }
   .field { margin-bottom: 14px; }
   .field-label { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
   .sm-input { width: 100%; background: #0e0f13; border: 1.5px solid #2a2d38; border-radius: 11px; padding: 12px 14px; color: #fff; font-size: 16px; font-weight: 600; outline: none; font-variant-numeric: tabular-nums; }
@@ -225,14 +225,15 @@ const THEMES = {
 const THEME_ORDER = ["green","orange","purple","blue","teal","red","gold","slate"];
 
 const CATEGORIES = {
-  cash:   { label: "銀行帳戶", unit: "",   qtyLabel: "",       priceLabel: "",          theme: "green" },
-  crypto: { label: "虛擬貨幣", unit: "顆", qtyLabel: "持有數量", priceLabel: "現價 (TWD/顆)", theme: "orange" },
-  stock:  { label: "股票",     unit: "股", qtyLabel: "持有股數", priceLabel: "股價 (TWD/股)", theme: "blue" },
+  cash:     { label: "銀行帳戶", unit: "",   qtyLabel: "",       priceLabel: "",             theme: "green" },
+  crypto:   { label: "虛擬貨幣", unit: "顆", qtyLabel: "持有數量", priceLabel: "現價 (TWD/顆)",   theme: "orange" },
+  stock_tw: { label: "台股",     unit: "股", qtyLabel: "持有股數", priceLabel: "股價 (TWD/股)",   theme: "blue" },
+  stock_us: { label: "美股",     unit: "股", qtyLabel: "持有股數", priceLabel: "股價 (TWD/股，可先概估)", theme: "red" },
 };
 // 取得某類別目前主題的調色盤（6 階色階陣列）
 function getPalette(cat) { return THEMES[CATEGORIES[cat]?.theme || "green"].shades; }
 
-const GROUP_ORDER = ["cash","crypto","stock"];
+const GROUP_ORDER = ["cash","crypto","stock_tw","stock_us"];
 const OTHER_COLOR = "#4b515c";
 const THRESHOLD = 0.03; // 3% 以下併入「其他」
 
@@ -252,7 +253,7 @@ let assets = [
   { id:"chang", cat:"cash",   name:"彰銀",       color:"#22b470", balance:132300, order:1 },
   { id:"btc",   cat:"crypto", name:"比特幣",     color:"#f18322", qty:0.04201, symbol:"BTC",  price:1996000, order:0 },
   { id:"eth",   cat:"crypto", name:"以太幣",     color:"#a46ae7", qty:0.1588,  symbol:"ETH",  price:56000, order:1 },
-  { id:"tw50",  cat:"stock",  name:"元大台灣50", color:"#2e74e5", qty:175,     symbol:"0050", price:108, order:0 },
+  { id:"tw50",  cat:"stock_tw",  name:"元大台灣50", color:"#2e74e5", qty:175,     symbol:"0050", price:108, order:0 },
 ];
 
 // 淨資產歷史（每次變動記一點）
@@ -736,162 +737,173 @@ function renderTreemap() {
 
 // ── 方塊互動：輕點 = 開啟調整面板；長按 0.32s 後拖曳 = 調整同類別內的顯示順序 ──
 // 拖曳時其他方塊會依 squarified treemap 重新計算、平滑流動讓位（既有的 CSS transition 負責這段動畫）
-function attachTileInteraction(el, assetRef) {
-  const LONG_PRESS_MS = 320;
-  const MOVE_CANCEL_PX = 10; // 長按計時器觸發前，手指移動超過這個距離視為滑動頁面，取消拖曳
+const LONG_PRESS_MS = 320;
+const MOVE_CANCEL_PX = 10; // 長按計時器觸發前，手指移動超過這個距離視為滑動頁面，取消拖曳
 
-  let timer = null;
-  let dragActive = false;
-  let startX=0, startY=0, startLeft=0, startTop=0;
-  let lastY=0; // 用來算「這一格」垂直移動量，手動捲動頁面用
-  let scrolling=false; // 是否已確認這次手勢是「捲動頁面」（超過無反應區門檻後才會是 true）
-  let hitW=0, hitH=0; // 判定用的固定尺寸（拿起來那一刻凍結，不受中途變形影響）
-  let lastIntentKey = null;
-  let layoutTouched = false; // 這次拖曳是否真的改動了版面結構（決定要不要存雲端）
+// ── 全域共用的拖曳狀態：整個 App 從頭到尾只有「一組」pointermove/pointerup 監聽器，
+// 不是每個方塊各自臨時掛一套。原本「按下才掛、放開才拆」的做法，若手機瀏覽器偶爾
+// 沒確實觸發 pointerup/pointercancel（快速滑動、被系統手勢打斷等），殘留的監聽器
+// 拆不掉，多組疊加執行就會讓畫面滑動時抖動。改成固定一組監聽器＋共用狀態物件後，
+// 不管有沒有確實觸發收尾，都不會有「監聽器疊加」的問題。
+let dragState = null; // null = 目前沒有任何方塊在被按住/拖曳
 
-  function cleanup() {
-    clearTimeout(timer); timer=null;
-    dragActive = false;
-    draggingId = null;
-    el.classList.remove("dragging");
-    el.style.zIndex = "";
-    el.style.transition = "";
-    lastIntentKey = null;
-    hitW = 0; hitH = 0;
+function resetDragState() {
+  if (dragState) {
+    clearTimeout(dragState.timer);
+    dragState.el.classList.remove("dragging");
+    dragState.el.style.zIndex = "";
+    dragState.el.style.transition = "";
   }
+  draggingId = null;
+  dragState = null;
+}
 
-  // 把資產從目前列陣結構中移除，再依「意圖」插入：
-  // mode='row'：插進目標的同一排（橫排並列）；mode='newrow'：在目標排的上/下方插入新的一排（直排堆疊）
-  function applyIntent(cat, assetId, intent) {
-    const rows = categoryLayout[cat];
-    if (!rows) return;
-    for (let i=rows.length-1;i>=0;i--) {
-      const idx = rows[i].indexOf(assetId);
-      if (idx>=0) { rows[i].splice(idx,1); if (rows[i].length===0) rows.splice(i,1); break; }
-    }
-    let targetRow=-1, targetCol=-1;
-    for (let i=0;i<rows.length;i++){ const idx=rows[i].indexOf(intent.targetId); if(idx>=0){targetRow=i;targetCol=idx;break;} }
-    if (targetRow===-1) { rows.push([assetId]); return; }
-    if (intent.mode==="row") {
-      const insertAt = intent.before ? targetCol : targetCol+1;
-      rows[targetRow].splice(insertAt, 0, assetId);
-    } else {
-      const newRowIdx = intent.before ? targetRow : targetRow+1;
-      rows.splice(newRowIdx, 0, [assetId]);
-    }
+// 把資產從目前列陣結構中移除，再依「意圖」插入：
+// mode='row'：插進目標的同一排（橫排並列）；mode='newrow'：在目標排的上/下方插入新的一排（直排堆疊）
+function applyIntent(cat, assetId, intent) {
+  const rows = categoryLayout[cat];
+  if (!rows) return;
+  for (let i=rows.length-1;i>=0;i--) {
+    const idx = rows[i].indexOf(assetId);
+    if (idx>=0) { rows[i].splice(idx,1); if (rows[i].length===0) rows.splice(i,1); break; }
   }
+  let targetRow=-1, targetCol=-1;
+  for (let i=0;i<rows.length;i++){ const idx=rows[i].indexOf(intent.targetId); if(idx>=0){targetRow=i;targetCol=idx;break;} }
+  if (targetRow===-1) { rows.push([assetId]); return; }
+  if (intent.mode==="row") {
+    const insertAt = intent.before ? targetCol : targetCol+1;
+    rows[targetRow].splice(insertAt, 0, assetId);
+  } else {
+    const newRowIdx = intent.before ? targetRow : targetRow+1;
+    rows.splice(newRowIdx, 0, [assetId]);
+  }
+}
 
-  function onPointerMove(e) {
-    const a = assets.find(x=>x.id===assetRef.id);
-    if (!a) return cleanup();
+function globalPointerMove(e) {
+  if (!dragState) return;
+  const { el, assetRef } = dragState;
+  const a = assets.find(x=>x.id===assetRef.id);
+  if (!a) { resetDragState(); return; }
 
-    if (!dragActive) {
-      const dx0 = e.clientX-startX, dy0=e.clientY-startY;
-      if (!scrolling) {
-        // 移動還在無反應區內：完全不做任何事（不捲動、不取消長按計時），
-        // 避免手拿著手機的自然手震被誤判成「要捲動」而讓畫面抖動
-        if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) {
-          clearTimeout(timer); timer=null;
-          scrolling = true;
-          lastY = e.clientY; // 從超過門檻的這一刻開始才手動捲動，之後跟手捲動
-        }
-        return;
+  if (!dragState.dragActive) {
+    const dx0 = e.clientX-dragState.startX, dy0=e.clientY-dragState.startY;
+    if (!dragState.scrolling) {
+      // 移動還在無反應區內：完全不做任何事（不捲動、不取消長按計時），
+      // 避免手拿著手機的自然手震被誤判成「要捲動」而讓畫面抖動
+      if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) {
+        clearTimeout(dragState.timer); dragState.timer=null;
+        dragState.scrolling = true;
+        dragState.lastY = e.clientY; // 從超過門檻的這一刻開始才手動捲動，之後跟手捲動
       }
-      // 已確定是滑動意圖：手動捲動頁面（.tile 關閉了瀏覽器原生手勢，改由這裡接手）
-      e.preventDefault();
-      const dyFrame = e.clientY - lastY;
-      lastY = e.clientY;
-      window.scrollBy(0, -dyFrame);
       return;
     }
-
+    // 已確定是滑動意圖：手動捲動頁面（.tile 關閉了瀏覽器原生手勢，改由這裡接手）
     e.preventDefault();
-    const dx = e.clientX-startX, dy = e.clientY-startY;
-    const newLeft = startLeft+dx, newTop = startTop+dy;
-    el.style.left = newLeft+"px";
-    el.style.top = newTop+"px";
-
-    // 用拖曳方塊的中心點，判斷目前疊在哪個方塊上
-    // 自由模式（freeMode）下不限制類別；否則只在同類別內判定
-    // 這裡刻意用「拿起來那一刻」凍結的 hitW/hitH，不用即時 DOM 尺寸，
-    // 否則方塊視覺變形會回頭影響判定、判定又觸發變形，形成抖動的回饋迴圈
-    const cx = newLeft + hitW/2, cy = newTop + hitH/2;
-    const hovered = lastNodes.find(n =>
-      n.id !== assetRef.id && n.ref && !n.ref.isOther && (freeMode || n.ref.cat === a.cat) &&
-      cx >= n.x && cx <= n.x+n.w && cy >= n.y && cy <= n.y+n.h
-    );
-    if (!hovered) return;
-
-    // 判斷落點在目標方塊的哪個象限：離左右邊近 → 橫排插入同一排；離上下邊近 → 直排插入新的一排
-    const relX = (cx - hovered.x) / hovered.w;
-    const relY = (cy - hovered.y) / hovered.h;
-    const distX = Math.min(relX, 1-relX);
-    const distY = Math.min(relY, 1-relY);
-    const intent = distX < distY
-      ? { mode:"row",    targetId: hovered.id, before: relX < 0.5 }
-      : { mode:"newrow", targetId: hovered.id, before: relY < 0.5 };
-    const key = `${intent.mode}:${intent.targetId}:${intent.before}`;
-    if (key === lastIntentKey) return;
-    lastIntentKey = key;
-
-    applyIntent(layoutKey(a), a.id, intent);
-    layoutTouched = true;
-    renderTreemap(); // 其他方塊依新結構平滑重新排列、讓位；拖曳中的方塊也會跟著變形（見 dragging 的 transition 設定）
+    const dyFrame = e.clientY - dragState.lastY;
+    dragState.lastY = e.clientY;
+    window.scrollBy(0, -dyFrame);
+    return;
   }
 
-  function onPointerUp() {
-    window.removeEventListener("pointermove", onPointerMove);
-    window.removeEventListener("pointerup", onPointerUp);
-    window.removeEventListener("pointercancel", onPointerUp);
+  e.preventDefault();
+  const dx = e.clientX-dragState.startX, dy = e.clientY-dragState.startY;
+  const newLeft = dragState.startLeft+dx, newTop = dragState.startTop+dy;
+  el.style.left = newLeft+"px";
+  el.style.top = newTop+"px";
 
-    if (!dragActive) {
-      // 沒有觸發拖曳（快速輕點）：視為一般點擊，開啟調整面板
-      clearTimeout(timer); timer=null;
-      if (assetRef.isOther) {
-        // 「其他」方塊每次渲染都會產生全新的 members 清單，這裡的 assetRef 是建立當下綁定的閉包、
-        // 可能是舊資料；改成即時去 lastNodes（每次渲染都會更新）撈最新的一份，避免點開內容過期
-        const latest = lastNodes.find(n=>n.id==="__other__");
-        openOtherSheet(latest ? latest.ref : assetRef);
-      } else {
-        openAdjust(assetRef.id);
-      }
-      return;
+  // 用拖曳方塊的中心點，判斷目前疊在哪個方塊上
+  // 自由模式（freeMode）下不限制類別；否則只在同類別內判定
+  // 這裡刻意用「拿起來那一刻」凍結的 hitW/hitH，不用即時 DOM 尺寸，
+  // 否則方塊視覺變形會回頭影響判定、判定又觸發變形，形成抖動的回饋迴圈
+  const cx = newLeft + dragState.hitW/2, cy = newTop + dragState.hitH/2;
+  const hovered = lastNodes.find(n =>
+    n.id !== assetRef.id && n.ref && !n.ref.isOther && (freeMode || n.ref.cat === a.cat) &&
+    cx >= n.x && cx <= n.x+n.w && cy >= n.y && cy <= n.y+n.h
+  );
+  if (!hovered) return;
+
+  // 判斷落點在目標方塊的哪個象限：離左右邊近 → 橫排插入同一排；離上下邊近 → 直排插入新的一排
+  const relX = (cx - hovered.x) / hovered.w;
+  const relY = (cy - hovered.y) / hovered.h;
+  const distX = Math.min(relX, 1-relX);
+  const distY = Math.min(relY, 1-relY);
+  const intent = distX < distY
+    ? { mode:"row",    targetId: hovered.id, before: relX < 0.5 }
+    : { mode:"newrow", targetId: hovered.id, before: relY < 0.5 };
+  const key = `${intent.mode}:${intent.targetId}:${intent.before}`;
+  if (key === dragState.lastIntentKey) return;
+  dragState.lastIntentKey = key;
+
+  applyIntent(layoutKey(a), a.id, intent);
+  dragState.layoutTouched = true;
+  renderTreemap(); // 其他方塊依新結構平滑重新排列、讓位；拖曳中的方塊也會跟著變形（見 dragging 的 transition 設定）
+}
+
+function globalPointerUp() {
+  if (!dragState) return;
+  const { el, assetRef, dragActive, layoutTouched } = dragState;
+
+  if (!dragActive) {
+    // 沒有觸發拖曳（快速輕點）：視為一般點擊，開啟調整面板
+    clearTimeout(dragState.timer);
+    dragState = null;
+    if (assetRef.isOther) {
+      // 「其他」方塊每次渲染都會產生全新的 members 清單，這裡的 assetRef 是建立當下綁定的閉包、
+      // 可能是舊資料；改成即時去 lastNodes（每次渲染都會更新）撈最新的一份，避免點開內容過期
+      const latest = lastNodes.find(n=>n.id==="__other__");
+      openOtherSheet(latest ? latest.ref : assetRef);
+    } else {
+      openAdjust(assetRef.id);
     }
-
-    const key = layoutKey(assetRef);
-    cleanup();
-    renderTreemap(); // 放開後，讓拖曳方塊也平滑歸位到最終計算出的格子（含形狀）
-    if (layoutTouched) saveCategoryLayout(key);
-    layoutTouched = false;
+    return;
   }
 
+  const key = layoutKey(assetRef);
+  resetDragState();
+  renderTreemap(); // 放開後，讓拖曳方塊也平滑歸位到最終計算出的格子（含形狀）
+  if (layoutTouched) saveCategoryLayout(key);
+}
+
+// App 從頭到尾只掛這一套，永遠不拆卸
+window.addEventListener("pointermove", globalPointerMove, { passive:false });
+window.addEventListener("pointerup", globalPointerUp);
+window.addEventListener("pointercancel", globalPointerUp);
+// 保險：分頁切到背景、視窗失焦時強制清空，避免任何邊界情況卡住殘留狀態
+window.addEventListener("blur", resetDragState);
+document.addEventListener("visibilitychange", ()=>{ if (document.hidden) resetDragState(); });
+
+function attachTileInteraction(el, assetRef) {
   el.addEventListener("pointerdown", (e) => {
     if (e.button !== undefined && e.button !== 0) return; // 只回應主要按鍵/單指
-    startX = e.clientX; startY = e.clientY;
-    lastY = e.clientY;
-    startLeft = parseFloat(el.style.left)||0;
-    startTop = parseFloat(el.style.top)||0;
-    dragActive = false;
-    scrolling = false;
+    if (dragState) return; // 已經有其他方塊正在處理中（理論上不會發生，多一層保險）
 
-    timer = setTimeout(() => {
-      if (assetRef.isOther) return; // 「其他」聚合方塊沒有單一位置概念，不支援拖曳
-      dragActive = true;
+    dragState = {
+      el, assetRef,
+      startX: e.clientX, startY: e.clientY,
+      lastY: e.clientY, // 用來算「這一格」垂直移動量，手動捲動頁面用
+      startLeft: parseFloat(el.style.left)||0,
+      startTop: parseFloat(el.style.top)||0,
+      dragActive: false,
+      scrolling: false, // 是否已確認這次手勢是「捲動頁面」
+      hitW: 0, hitH: 0, // 判定用的固定尺寸（拿起來那一刻凍結）
+      lastIntentKey: null,
+      layoutTouched: false, // 這次拖曳是否真的改動了版面結構
+      timer: null,
+    };
+
+    dragState.timer = setTimeout(() => {
+      if (!dragState || dragState.el !== el) return; // 這期間已經放開或換了別的方塊，作廢
+      if (assetRef.isOther) { dragState = null; return; } // 「其他」聚合方塊不支援拖曳
+      dragState.dragActive = true;
       draggingId = assetRef.id;
-      // 判定用的尺寸：固定用「拿起來那一刻」的原始大小，不會因為方塊中途變形而跟著跳動
-      // （避免「變形→判定改變→又變形」自己打自己造成的抖動）
-      hitW = parseFloat(el.style.width)||0;
-      hitH = parseFloat(el.style.height)||0;
+      dragState.hitW = parseFloat(el.style.width)||0;
+      dragState.hitH = parseFloat(el.style.height)||0;
       el.classList.add("dragging");
       el.style.zIndex = "40";
       // 位置(left/top)不放進 transition，才能精準跟著手指；
       // 但把 width/height 放進去，讓拖曳中的方塊「視覺上」能隨版面變化平滑變形（純視覺，不影響判定）
       el.style.transition = "width .22s ease, height .22s ease, box-shadow .2s ease, transform .15s ease";
     }, LONG_PRESS_MS);
-
-    window.addEventListener("pointermove", onPointerMove, { passive:false });
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", onPointerUp);
   });
 }
 
@@ -1360,15 +1372,19 @@ function openAdd() {
 
   function renderFields(cat) {
     const c=CATEGORIES[cat];
+    const namePh = cat==="cash" ? "例：國泰世華" : cat==="crypto" ? "例：Solana" : cat==="stock_us" ? "例：Apple" : "例：台積電";
+    const symPh = cat==="crypto" ? "例：SOL" : cat==="stock_us" ? "例：AAPL" : "例：2330";
+    const qtyPh = cat==="crypto" ? "0.05" : "100";
+    const pricePh = cat==="crypto" ? "6000000" : "1000";
     fields.innerHTML = `<div class="expand-note">
       <div class="field"><div class="field-label">名稱</div>
-        <input class="sm-input" id="fName" placeholder="${cat==="cash"?"例：國泰世華":cat==="crypto"?"例：Solana":"例：台積電"}"></div>
+        <input class="sm-input" id="fName" placeholder="${namePh}"></div>
       ${cat==="cash"
         ? `<div class="field"><div class="field-label">初始金額</div><input class="sm-input" id="fBal" type="number" inputmode="numeric" placeholder="0"></div>`
-        : `<div class="field"><div class="field-label">代號</div><input class="sm-input" id="fSym" placeholder="${cat==="crypto"?"例：SOL":"例：2330"}"></div>
+        : `<div class="field"><div class="field-label">代號</div><input class="sm-input" id="fSym" placeholder="${symPh}"></div>
            <div class="row2">
-             <div class="field" style="flex:1"><div class="field-label">${c.qtyLabel}</div><input class="sm-input" id="fQty" type="number" inputmode="decimal" placeholder="${cat==="crypto"?"0.05":"100"}"></div>
-             <div class="field" style="flex:1"><div class="field-label">${c.priceLabel}</div><input class="sm-input" id="fPrice" type="number" inputmode="decimal" placeholder="${cat==="crypto"?"6000000":"1000"}"></div>
+             <div class="field" style="flex:1"><div class="field-label">${c.qtyLabel}</div><input class="sm-input" id="fQty" type="number" inputmode="decimal" placeholder="${qtyPh}"></div>
+             <div class="field" style="flex:1"><div class="field-label">${c.priceLabel}</div><input class="sm-input" id="fPrice" type="number" inputmode="decimal" placeholder="${pricePh}"></div>
            </div>
            <div class="note-sm">＊之後接即時價 API 後價格會自動更新，你只要維護數量</div>`}
       <button class="primary-btn" id="addConfirm" disabled style="background:#5b8def;color:#fff">新增到資產</button>
@@ -1402,8 +1418,8 @@ function openAdd() {
       const newA = assets[assets.length-1];
       confirm.disabled=true; confirm.textContent="新增中…";
       await commit(newA); // 等確實存進雲端才關視窗，避免存到一半被中斷、下次打開就不見
-      // 若新增的是幣，順手抓它的即時價
-      if (cat==="crypto") refreshPrices(true);
+      // 幣種、股票新增後順手抓一次即時價
+      if (cat==="crypto" || cat==="stock_tw" || cat==="stock_us") refreshPrices(true);
     };
   }
 }
@@ -1423,9 +1439,12 @@ freeModeBtn.onclick = () => {
 
 // ── 即時價 ──
 // 幣價：CoinGecko 公開 API（免金鑰、直接回台幣、有開 CORS，前端可直接抓）
-// 股價：透過 Vercel serverless（api/twstock.js）代理證交所即時 API，繞過瀏覽器跨域限制
+// 台股：透過 Vercel serverless（api/twstock.js）代理證交所即時 API，繞過瀏覽器跨域限制
+// 美股：透過 Vercel serverless（api/usstock.js）代理 Stooq 即時報價，抓到的是美元，
+//      這裡統一換算成台幣再存進 a.price（App 內部所有金額一律以台幣為準，跟其他類別一致）
 const STOCK_API_READY = true;
-const STOCK_PROXY_URL = "/api/twstock";
+const TWSTOCK_PROXY_URL = "/api/twstock";
+const USSTOCK_PROXY_URL = "/api/usstock";
 
 async function fetchCryptoPrices() {
   const cryptos = assets.filter(a => a.cat === "crypto");
@@ -1485,14 +1504,26 @@ async function fetchCryptoPrices() {
   return { ok, fail, err: out ? null : (lastErr ? lastErr.message : "全部來源失敗") };
 }
 
-async function fetchStockPrices() {
+// 抓目前 USD/TWD 匯率：借用 CoinGecko 的 USDT 報價當代理（USDT 跟美元 1:1 掛鉤），
+// 不用另外接一個匯率 API。抓失敗就用保底匯率 32，不會讓美股完全抓不到價。
+async function getUsdTwdRate() {
+  try {
+    const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=twd");
+    if (!r.ok) throw new Error("匯率來源 HTTP "+r.status);
+    const d = await r.json();
+    if (d.tether && d.tether.twd) return d.tether.twd;
+  } catch(e) { console.warn("匯率抓取失敗，改用保底匯率:", e.message); }
+  return 32;
+}
+
+async function fetchTWStockPrices() {
   if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true, err:null };
-  const stocks = assets.filter(a => a.cat === "stock");
+  const stocks = assets.filter(a => a.cat === "stock_tw");
   if (!stocks.length) return { ok:0, fail:0, err:null };
   const codes = stocks.map(a => a.symbol).join(",");
   let ok=0, fail=0, err=null;
   try {
-    const res = await fetch(`${STOCK_PROXY_URL}?codes=${encodeURIComponent(codes)}`);
+    const res = await fetch(`${TWSTOCK_PROXY_URL}?codes=${encodeURIComponent(codes)}`);
     if (!res.ok) throw new Error("代理 HTTP "+res.status);
     const data = await res.json(); // 預期格式：{ "0050": 108.25, ... }
     stocks.forEach(a => {
@@ -1503,7 +1534,33 @@ async function fetchStockPrices() {
   } catch(e) {
     fail = stocks.length;
     err = e.message;
-    console.warn("股價抓取失敗:", e.message);
+    console.warn("台股股價抓取失敗:", e.message);
+  }
+  return { ok, fail, err };
+}
+
+async function fetchUSStockPrices() {
+  if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true, err:null };
+  const stocks = assets.filter(a => a.cat === "stock_us");
+  if (!stocks.length) return { ok:0, fail:0, err:null };
+  const codes = stocks.map(a => a.symbol).join(",");
+  let ok=0, fail=0, err=null;
+  try {
+    const [res, usdtwd] = await Promise.all([
+      fetch(`${USSTOCK_PROXY_URL}?codes=${encodeURIComponent(codes)}`),
+      getUsdTwdRate(),
+    ]);
+    if (!res.ok) throw new Error("代理 HTTP "+res.status);
+    const data = await res.json(); // 預期格式：{ "AAPL": 150.5, ... }（美元）
+    stocks.forEach(a => {
+      if (data[a.symbol]) { a.price = data[a.symbol] * usdtwd; ok++; } // 換算成台幣再存
+      else fail++;
+    });
+    if (fail>0 && ok===0) err = "Stooq 無回應資料（可能休市或代號錯誤）";
+  } catch(e) {
+    fail = stocks.length;
+    err = e.message;
+    console.warn("美股股價抓取失敗:", e.message);
   }
   return { ok, fail, err };
 }
@@ -1517,7 +1574,7 @@ async function refreshPrices(silent=false) {
   const status = document.getElementById("priceStatus");
   if (status && !silent) status.textContent = "更新價格中…";
 
-  const [c, s] = await Promise.all([fetchCryptoPrices(), fetchStockPrices()]);
+  const [c, tw, us] = await Promise.all([fetchCryptoPrices(), fetchTWStockPrices(), fetchUSStockPrices()]);
 
   if (btn) btn.classList.remove("spinning");
   const now = new Date();
@@ -1525,9 +1582,9 @@ async function refreshPrices(silent=false) {
   const mm = String(now.getMinutes()).padStart(2,"0");
   if (status) {
     const hasCrypto = assets.some(a => a.cat === "crypto");
-    const hasStock = assets.some(a => a.cat === "stock");
-    const totalOk = c.ok + s.ok;
-    const totalFail = c.fail + s.fail;
+    const hasStock = assets.some(a => a.cat === "stock_tw" || a.cat === "stock_us");
+    const totalOk = c.ok + tw.ok + us.ok;
+    const totalFail = c.fail + tw.fail + us.fail;
     const nothingToFetch = !hasCrypto && !hasStock;
 
     if (nothingToFetch) {
@@ -1543,7 +1600,7 @@ async function refreshPrices(silent=false) {
       // 全失敗：顯示原因，多半是 file:// 開啟或被限流
       const reason = c.err && /Failed to fetch|NetworkError|CORS/i.test(c.err)
         ? "無法連線（可能是用檔案直接開啟，需用網址開啟）"
-        : (c.err || s.err || "抓取失敗");
+        : (c.err || tw.err || us.err || "抓取失敗");
       status.textContent = `價格更新失敗：${reason}`;
       status.style.color = "#e8804a";
     }
