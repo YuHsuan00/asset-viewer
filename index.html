@@ -407,6 +407,22 @@ async function deleteRecurringRule(id) {
   catch(e) { console.warn("定期定額刪除失敗:", e.message); }
 }
 
+// 原子性搶佔某條規則「某一天」的執行權：用條件式更新（只有 last_run_date 還不是這天時才准許改成這天），
+// 讓 Supabase 自己保證不會有兩邊（Cron 和開 App 補跑）同時搶到、重複扣款。
+// 回傳 true = 搶到了、可以真的去扣款；false = 搶輸了（已經被執行過），這次直接放棄。
+async function claimRecurringRule(rule, dateString) {
+  if (!cloudOn()) { rule.last_run_date = dateString; return true; } // 離線模式沒有並發風險，直接視為搶到
+  try {
+    const { data, error } = await sb.from("recurring_transfers")
+      .update({ last_run_date: dateString })
+      .eq("id", rule.id)
+      .or(`last_run_date.is.null,last_run_date.neq.${dateString}`)
+      .select();
+    if (error) { console.warn("定期定額搶佔失敗:", error.message); return false; }
+    return Array.isArray(data) && data.length > 0;
+  } catch(e) { console.warn("定期定額搶佔失敗:", e.message); return false; }
+}
+
 const nf = n => Math.round(n).toLocaleString();
 
 // 精準量測文字實際渲染寬度（用真實內容+字重+字級去量，不用猜的固定門檻）
@@ -1820,6 +1836,7 @@ function applyRecurringOccurrence(rule, from, to) {
 
 // 開 App 時補執行：檢查每條啟用中的規則，把「上次執行日」到「今天」之間錯過的日子都補跑一次。
 // 這是方案 A（保險機制）——就算 Vercel Cron 那天沒有成功觸發，開 App 時還是會補上，不會漏掉。
+// 每一天的執行都會先呼叫 claimRecurringRule() 原子性搶佔，搶輸（代表 Cron 已經搶先執行過）就跳過不重複扣款。
 async function runDueRecurringRules() {
   if (!recurringRules.length) return;
   const today = new Date();
@@ -1836,9 +1853,19 @@ async function runDueRecurringRules() {
     let safety = 0; // 防呆：最多往前補 400 天，避免規則資料異常時無窮迴圈
     while (cursor <= today && safety < 400) {
       if ((rule.days_of_month||[]).includes(cursor.getDate())) {
-        applyRecurringOccurrence(rule, from, to);
-        rule.last_run_date = dateStr(cursor);
-        anyExecuted = true;
+        const ds = dateStr(cursor);
+        const claimed = await claimRecurringRule(rule, ds);
+        if (claimed) {
+          applyRecurringOccurrence(rule, from, to);
+          rule.last_run_date = ds;
+          anyExecuted = true;
+          await saveAssetToCloud(from);
+          await saveAssetToCloud(to);
+        } else {
+          // 搶輸了：這天其實已經被 Cron（或別的裝置）執行過了，不重複扣款，
+          // 只同步本地這條規則的 last_run_date，讓後續判斷繼續往下一天走
+          rule.last_run_date = ds;
+        }
       }
       cursor = addDays(cursor, 1);
       safety++;
@@ -1846,8 +1873,6 @@ async function runDueRecurringRules() {
   }
 
   if (anyExecuted) {
-    await Promise.all(recurringRules.map(r=>saveRecurringRule(r)));
-    await Promise.all(assets.map(a=>saveAssetToCloud(a))); // 圖方便：全部存一次，避免漏存被改到的資產
     pushHistory();
     await saveNetWorthSnapshot(netWorth());
   }
