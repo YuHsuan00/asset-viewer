@@ -41,11 +41,26 @@ export default async function handler(req, res) {
     for (const rule of rules) {
       const days = rule.days_of_month || [];
       if (!days.includes(todayDay)) continue;
-      if (rule.last_run_date === todayStr) continue; // 今天已經執行過，避免重複扣款
+      if (rule.last_run_date === todayStr) continue; // 快速跳過：明顯今天已經跑過的，省一次 API 呼叫
+
+      // ── 原子性搶佔：用「條件式更新」讓資料庫自己保證同一天只有一個人搶得到執行權 ──
+      // 條件是「last_run_date 還不是今天（或從沒執行過）」才准許更新成今天；
+      // 搶輸的人（不管是 Cron 還是使用者開 App 補跑）會被 where 條件擋下，回傳空陣列，代表這次直接放棄不執行。
+      // 這一步要在「真的去扣款」之前做，這樣就算扣款那步網路中斷失敗，最壞情況只是「這次沒扣到」，
+      // 而不是「扣了但沒標記成功、下次又重複扣一次」。
+      const claimUrl = `${SUPABASE_URL}/rest/v1/recurring_transfers?id=eq.${encodeURIComponent(rule.id)}&or=(last_run_date.is.null,last_run_date.neq.${todayStr})`;
+      const claimRes = await fetch(claimUrl, {
+        method: "PATCH",
+        headers: { ...headers, Prefer: "return=representation" },
+        body: JSON.stringify({ last_run_date: todayStr }),
+      });
+      if (!claimRes.ok) continue; // 搶佔請求本身失敗，跳過這條規則，不做任何資產異動
+      const claimed = await claimRes.json();
+      if (!Array.isArray(claimed) || claimed.length === 0) continue; // 搶輸了（已經被搶走），放棄這次執行
 
       const from = assetMap[rule.from_id];
       const to = assetMap[rule.to_id];
-      if (!from || !to) continue; // 來源或目標資產已被刪除，規則失效跳過
+      if (!from || !to) continue; // 來源或目標資產已被刪除，規則失效跳過（執行權已搶到但沒有資產可動，等同放棄）
 
       const fromIsCash = from.cat === "cash";
       const toIsCash = to.cat === "cash";
@@ -63,9 +78,6 @@ export default async function handler(req, res) {
         fetch(`${SUPABASE_URL}/rest/v1/assets?id=eq.${encodeURIComponent(from.id)}`, { method: "PATCH", headers, body: JSON.stringify(fromPatch) }),
         fetch(`${SUPABASE_URL}/rest/v1/assets?id=eq.${encodeURIComponent(to.id)}`, { method: "PATCH", headers, body: JSON.stringify(toPatch) }),
       ]);
-      await fetch(`${SUPABASE_URL}/rest/v1/recurring_transfers?id=eq.${encodeURIComponent(rule.id)}`, {
-        method: "PATCH", headers, body: JSON.stringify({ last_run_date: todayStr }),
-      });
 
       // 同步更新記憶體中的資產值，供下面算淨值快照用
       Object.assign(from, fromPatch);
