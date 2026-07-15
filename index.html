@@ -394,8 +394,7 @@ async function saveRecurringRule(rule) {
   try {
     await sb.from("recurring_transfers").upsert({
       id: rule.id, from_id: rule.from_id, to_id: rule.to_id,
-      from_amount: rule.from_amount, to_amount: rule.to_amount,
-      days_of_month: rule.days_of_month, active: rule.active,
+      amount_twd: rule.amount_twd, days_of_month: rule.days_of_month, active: rule.active,
       last_run_date: rule.last_run_date || null,
     });
   } catch(e) { console.warn("定期定額儲存失敗:", e.message); }
@@ -1479,15 +1478,15 @@ function openAdd() {
   function renderRecurringPane() {
     fields.innerHTML = `
       <div class="expand-note">
-        <div class="sheet-desc" style="margin-top:-4px">到了設定的日期會自動從 A 轉一筆到 B（伺服器每天自動執行，開 App 時也會補跑一次沒執行到的，雙重保險）</div>
+        <div class="sheet-desc" style="margin-top:-4px">到了設定的日期會自動從 A 轉一筆到 B（伺服器每天自動執行，開 App 時也會補跑一次沒執行到的，雙重保險）。買幣/股會用「執行當下的即時價」自動換算成買到幾顆/幾股，不用自己心算</div>
         <div id="ruleList"></div>
         <button class="primary-btn" id="newRuleBtn" style="background:#5b8def;margin-top:6px">＋ 新增規則</button>
         <div id="ruleForm" style="display:none; margin-top:16px;">
           <div class="field"><div class="field-label">從哪個資產扣</div><div class="target-list" id="ruleFromList"></div></div>
           <div class="field"><div class="field-label">轉去哪個資產</div><div class="target-list" id="ruleToList"></div></div>
           <div class="field"><div class="field-label">每月哪幾天執行（可複選）</div><div class="day-grid" id="dayGrid"></div></div>
-          <div class="field"><div class="field-label" id="ruleFromLabel">從來源扣除數量</div><input class="sm-input" id="ruleFromAmt" type="number" inputmode="decimal" placeholder="0"></div>
-          <div class="field"><div class="field-label" id="ruleToLabel">轉入目標數量</div><input class="sm-input" id="ruleToAmt" type="number" inputmode="decimal" placeholder="0"></div>
+          <div class="field"><div class="field-label" id="ruleAmtLabel">每次投入金額（台幣）</div><input class="sm-input" id="ruleAmt" type="number" inputmode="numeric" placeholder="0"></div>
+          <div class="note-sm" id="ruleEstimate"></div>
           <button class="primary-btn" id="ruleSaveBtn" disabled style="background:#5b8def">儲存規則</button>
         </div>
       </div>
@@ -1499,10 +1498,9 @@ function openAdd() {
     const ruleFromList = fields.querySelector("#ruleFromList");
     const ruleToList = fields.querySelector("#ruleToList");
     const dayGrid = fields.querySelector("#dayGrid");
-    const ruleFromAmt = fields.querySelector("#ruleFromAmt");
-    const ruleToAmt = fields.querySelector("#ruleToAmt");
-    const ruleFromLabel = fields.querySelector("#ruleFromLabel");
-    const ruleToLabel = fields.querySelector("#ruleToLabel");
+    const ruleAmt = fields.querySelector("#ruleAmt");
+    const ruleAmtLabel = fields.querySelector("#ruleAmtLabel");
+    const ruleEstimate = fields.querySelector("#ruleEstimate");
     const ruleSaveBtn = fields.querySelector("#ruleSaveBtn");
 
     let selFrom=null, selTo=null, selDays=new Set();
@@ -1523,7 +1521,7 @@ function openAdd() {
             <span style="font-size:14px;font-weight:600;color:#e8eaed">${fromName} → ${toName}</span>
             <span style="font-size:11px;color:${r.active?'#3fb07a':'#6b7280'}">${r.active?'啟用中':'已暫停'}</span>
           </div>
-          <div style="font-size:12px;color:#8a94a6">每月 ${daysTxt}・扣 ${r.from_amount}・轉入 ${r.to_amount}</div>
+          <div style="font-size:12px;color:#8a94a6">每月 ${daysTxt}・每次投入 ${nf(r.amount_twd)} 元（依執行當下即時價換算）</div>
           <div style="display:flex;gap:8px;margin-top:8px">
             <button class="quick-btn rule-toggle" style="flex:1">${r.active?'暫停':'恢復'}</button>
             <button class="quick-btn rule-delete" style="flex:1;color:#d9645a">刪除</button>
@@ -1577,28 +1575,43 @@ function openAdd() {
       }
     }
 
-    function updateLabels() {
-      if (selFrom) ruleFromLabel.textContent = `從「${selFrom.name}」扣除（${selFrom.cat==="cash"?"金額":CATEGORIES[selFrom.cat].unit}）`;
-      if (selTo) ruleToLabel.textContent = `轉入「${selTo.name}」數量（${selTo.cat==="cash"?"金額":CATEGORIES[selTo.cat].unit}）`;
+    // 用資產「目前」的即時價，預覽這筆金額大概能換到多少（僅供參考，實際執行當天會用當時的即時價重新算）
+    function updateEstimate() {
+      if (!selFrom || !selTo || !ruleAmt.value) { ruleEstimate.textContent=""; return; }
+      const amt = Number(ruleAmt.value);
+      if (!amt || amt<=0) { ruleEstimate.textContent=""; return; }
+      const fromUnitPrice = selFrom.cat==="cash" ? 1 : selFrom.price;
+      const toUnitPrice = selTo.cat==="cash" ? 1 : selTo.price;
+      if (!fromUnitPrice || !toUnitPrice) {
+        ruleEstimate.textContent = "＊來源或目標還沒有即時價格，暫時無法預覽換算數量";
+        return;
+      }
+      const fromUnit = selFrom.cat==="cash" ? "元" : CATEGORIES[selFrom.cat].unit;
+      const toUnit = selTo.cat==="cash" ? "元" : CATEGORIES[selTo.cat].unit;
+      const fromQty = amt/fromUnitPrice, toQty = amt/toUnitPrice;
+      ruleEstimate.textContent = `以目前價格估算：扣約 ${fromQty.toFixed(fromUnitPrice===1?0:6)} ${fromUnit} → 買到約 ${toQty.toFixed(toUnitPrice===1?0:6)} ${toUnit}（實際以執行當天即時價為準）`;
+    }
+
+    function updateLabel() {
+      ruleAmtLabel.textContent = "每次投入金額（台幣）";
     }
 
     function check() {
       ruleSaveBtn.disabled = !(selFrom && selTo && selFrom!==selTo && selDays.size>0 &&
-        ruleFromAmt.value && Number(ruleFromAmt.value)>0 && ruleToAmt.value && Number(ruleToAmt.value)>0);
+        ruleAmt.value && Number(ruleAmt.value)>0);
+      updateEstimate();
     }
-    ruleFromAmt.oninput=check;
-    ruleToAmt.oninput=check;
+    ruleAmt.oninput=check;
 
     newRuleBtn.onclick=()=>{
       const showing = ruleForm.style.display!=="none";
       if (showing) { ruleForm.style.display="none"; return; }
       selFrom=null; selTo=null; selDays=new Set();
-      ruleFromAmt.value=""; ruleToAmt.value="";
-      ruleFromLabel.textContent="從來源扣除數量";
-      ruleToLabel.textContent="轉入目標數量";
+      ruleAmt.value=""; ruleEstimate.textContent="";
+      updateLabel();
       ruleForm.style.display="block";
-      buildAssetList(ruleFromList, (a)=>{ selFrom=a; updateLabels(); check(); });
-      buildAssetList(ruleToList, (a)=>{ selTo=a; updateLabels(); check(); });
+      buildAssetList(ruleFromList, (a)=>{ selFrom=a; check(); });
+      buildAssetList(ruleToList, (a)=>{ selTo=a; check(); });
       buildDayGrid();
       check();
     };
@@ -1607,7 +1620,7 @@ function openAdd() {
       const rule = {
         id: "r"+Date.now(),
         from_id: selFrom.id, to_id: selTo.id,
-        from_amount: Number(ruleFromAmt.value), to_amount: Number(ruleToAmt.value),
+        amount_twd: Number(ruleAmt.value),
         days_of_month: Array.from(selDays).sort((a,b)=>a-b),
         active: true, last_run_date: null,
       };
@@ -1826,12 +1839,22 @@ function dateStr(d) {
 }
 function addDays(d, n) { const r=new Date(d); r.setDate(r.getDate()+n); return r; }
 
-// 執行一次定期定額的單一次扣款（From 扣、To 加）
+// 執行一次定期定額的單一次扣款：固定投入金額（台幣），兩邊各自用「執行當下」的即時價換算成要扣/加多少數量。
+// 回傳 true=成功執行、false=價格還沒抓到暫時無法換算（跳過這次，下次補執行時再試）
 function applyRecurringOccurrence(rule, from, to) {
-  if (from.cat==="cash") from.balance = Math.max(0, (from.balance||0)-rule.from_amount);
-  else from.qty = Math.max(0, +((from.qty||0)-rule.from_amount).toFixed(8));
-  if (to.cat==="cash") to.balance = (to.balance||0)+rule.to_amount;
-  else to.qty = +((to.qty||0)+rule.to_amount).toFixed(8);
+  const fromUnitPrice = from.cat==="cash" ? 1 : from.price;
+  const toUnitPrice = to.cat==="cash" ? 1 : to.price;
+  if (!fromUnitPrice || !toUnitPrice) {
+    console.warn(`定期定額 ${rule.id} 因來源或目標尚無即時價格，暫時跳過這次執行`);
+    return false;
+  }
+  const fromDelta = rule.amount_twd / fromUnitPrice;
+  const toDelta = rule.amount_twd / toUnitPrice;
+  if (from.cat==="cash") from.balance = Math.max(0, (from.balance||0)-fromDelta);
+  else from.qty = Math.max(0, +((from.qty||0)-fromDelta).toFixed(8));
+  if (to.cat==="cash") to.balance = (to.balance||0)+toDelta;
+  else to.qty = +((to.qty||0)+toDelta).toFixed(8);
+  return true;
 }
 
 // 開 App 時補執行：檢查每條啟用中的規則，把「上次執行日」到「今天」之間錯過的日子都補跑一次。
@@ -1848,6 +1871,12 @@ async function runDueRecurringRules() {
     const to = assets.find(a=>a.id===rule.to_id);
     if (!from || !to) continue; // 來源或目標資產已刪除，規則失效跳過
 
+    // 價格還沒抓到就不要去搶執行權，避免「搶到了、卻因為換算不出數量而白白浪費這次機會」，
+    // 這條規則這次先整條跳過，下次補執行（或明天 Cron）價格應該就有了，會自動重試
+    const fromUnitPrice = from.cat==="cash" ? 1 : from.price;
+    const toUnitPrice = to.cat==="cash" ? 1 : to.price;
+    if (!fromUnitPrice || !toUnitPrice) continue;
+
     let cursor = rule.last_run_date ? addDays(new Date(rule.last_run_date+"T00:00:00"), 1)
                                      : new Date(rule.created_at || today);
     let safety = 0; // 防呆：最多往前補 400 天，避免規則資料異常時無窮迴圈
@@ -1856,7 +1885,7 @@ async function runDueRecurringRules() {
         const ds = dateStr(cursor);
         const claimed = await claimRecurringRule(rule, ds);
         if (claimed) {
-          applyRecurringOccurrence(rule, from, to);
+          applyRecurringOccurrence(rule, from, to); // 上面已確認價格可用，這裡不會失敗
           rule.last_run_date = ds;
           anyExecuted = true;
           await saveAssetToCloud(from);
