@@ -62,7 +62,8 @@
   #treemap-inner { position: relative; width: 100%; height: 100%; }
   .tile {
     position: absolute; padding: 3.5px; cursor: pointer;
-    touch-action: none; /* 完全交由 JS 判斷：快滑=手動捲動頁面、按住不動=拿起方塊，避免跟瀏覽器原生滑動搶手勢 */
+    touch-action: pan-y; /* 平常讓瀏覽器原生處理垂直捲動（順、不會跟自己寫的邏輯打架），
+                             只有真正判定成拖曳時才用 e.preventDefault() 介入接管，見 globalPointerMove */
     transition: left .55s cubic-bezier(.34,1.15,.4,1), top .55s cubic-bezier(.34,1.15,.4,1),
                 width .55s cubic-bezier(.34,1.15,.4,1), height .55s cubic-bezier(.34,1.15,.4,1);
   }
@@ -836,22 +837,18 @@ function globalPointerMove(e) {
   if (!a) { resetDragState(); return; }
 
   if (!dragState.dragActive) {
-    const dx0 = e.clientX-dragState.startX, dy0=e.clientY-dragState.startY;
+    // 這個階段完全不呼叫 preventDefault、不手動操作 scroll——.tile 已設 touch-action:pan-y，
+    // 讓瀏覽器原生處理垂直捲動（順、不會跟自己寫的邏輯打架，之前手動 window.scrollBy() 那版
+    // 會跟瀏覽器原生捲動機制互搶，變成「推一下、彈回來」的抖動）。
+    // 這裡只是持續監看移動量：一旦超過無反應區門檻，代表使用者是要滑動頁面、不是要長按，
+    // 取消長按計時器即可，捲動本身完全不用我們插手。
     if (!dragState.scrolling) {
-      // 移動還在無反應區內：完全不做任何事（不捲動、不取消長按計時），
-      // 避免手拿著手機的自然手震被誤判成「要捲動」而讓畫面抖動
+      const dx0 = e.clientX-dragState.startX, dy0=e.clientY-dragState.startY;
       if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) {
         clearTimeout(dragState.timer); dragState.timer=null;
         dragState.scrolling = true;
-        dragState.lastY = e.clientY; // 從超過門檻的這一刻開始才手動捲動，之後跟手捲動
       }
-      return;
     }
-    // 已確定是滑動意圖：手動捲動頁面（.tile 關閉了瀏覽器原生手勢，改由這裡接手）
-    e.preventDefault();
-    const dyFrame = e.clientY - dragState.lastY;
-    dragState.lastY = e.clientY;
-    window.scrollBy(0, -dyFrame);
     return;
   }
 
@@ -891,12 +888,17 @@ function globalPointerMove(e) {
 
 function globalPointerUp() {
   if (!dragState) return;
-  const { el, assetRef, dragActive, layoutTouched } = dragState;
+  const { el, assetRef, dragActive, scrolling, layoutTouched } = dragState;
 
   if (!dragActive) {
-    // 沒有觸發拖曳（快速輕點）：視為一般點擊，開啟調整面板
     clearTimeout(dragState.timer);
     dragState = null;
+    // 這次手勢如果已經被判定成「滑動頁面」，放開手指時就不該當成點擊——
+    // 不然一段長距離滑動通常是由好幾段「滑一下、放開、再滑一下」組成，
+    // 只要某一段剛好是從方塊上開始滑，放開瞬間就會被誤判成點擊、彈出調整視窗，
+    // 滑好幾段就跳好幾次，看起來就像視窗一直跳出來又收回去。
+    if (scrolling) return;
+    // 沒有觸發拖曳、也不是滑動（純粹快速輕點）：視為一般點擊，開啟調整面板
     if (assetRef.isOther) {
       // 「其他」方塊每次渲染都會產生全新的 members 清單，這裡的 assetRef 是建立當下綁定的閉包、
       // 可能是舊資料；改成即時去 lastNodes（每次渲染都會更新）撈最新的一份，避免點開內容過期
@@ -930,11 +932,10 @@ function attachTileInteraction(el, assetRef) {
     dragState = {
       el, assetRef,
       startX: e.clientX, startY: e.clientY,
-      lastY: e.clientY, // 用來算「這一格」垂直移動量，手動捲動頁面用
       startLeft: parseFloat(el.style.left)||0,
       startTop: parseFloat(el.style.top)||0,
       dragActive: false,
-      scrolling: false, // 是否已確認這次手勢是「捲動頁面」
+      scrolling: false, // 是否已確認這次手勢是「滑動頁面」（純粹用來標記不是點擊，捲動本身交給瀏覽器原生處理）
       hitW: 0, hitH: 0, // 判定用的固定尺寸（拿起來那一刻凍結）
       lastIntentKey: null,
       layoutTouched: false, // 這次拖曳是否真的改動了版面結構
