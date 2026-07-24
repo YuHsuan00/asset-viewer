@@ -1819,7 +1819,14 @@ async function refreshPrices(silent=false) {
 }
 
 // ── 初始化 ──
-window.addEventListener("resize",()=>renderTreemap());
+// resize 事件加防抖：手機 Safari 滑動時網址列會收起/展開，這會讓可視區域高度改變、
+// 連續觸發好幾次 resize，若每次都立刻重新計算整個 treemap，滑動過程中畫面會一直被打斷重排，
+// 看起來就像抖動——這裡改成「停止變動一小段時間後才真的重新計算」，把這些瞬間觸發過濾掉
+let resizeDebounceTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeDebounceTimer);
+  resizeDebounceTimer = setTimeout(() => renderTreemap(), 180);
+});
 
 // 幫任何 Promise 加逾時保護：超過時間就當作失敗，不再無限等待
 function withTimeout(promise, ms, label) {
