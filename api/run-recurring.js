@@ -68,9 +68,15 @@ export default async function handler(req, res) {
       const claimed = await claimRes.json();
       if (!Array.isArray(claimed) || claimed.length === 0) continue; // 搶輸了（已經被搶走），放棄這次執行
 
+      const isWholeShare = (cat) => cat === "stock_tw" || cat === "stock_us";
       const amountTwd = Number(rule.amount_twd);
-      const fromDelta = amountTwd / fromUnitPrice;
-      const toDelta = amountTwd / toUnitPrice;
+      // 先算目標那邊：股票只能整股（無條件捨去），現金/幣可以有小數
+      let toDelta = amountTwd / toUnitPrice;
+      if (isWholeShare(to.cat)) toDelta = Math.floor(toDelta);
+      // 用「目標實際買到的價值」反推來源要扣多少，多的零頭不扣、留在來源帳戶
+      const actualValue = toDelta * toUnitPrice;
+      let fromDelta = actualValue / fromUnitPrice;
+      if (isWholeShare(from.cat)) fromDelta = Math.floor(fromDelta);
 
       const fromIsCash = from.cat === "cash";
       const toIsCash = to.cat === "cash";
