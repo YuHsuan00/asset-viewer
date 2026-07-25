@@ -238,6 +238,11 @@ const CATEGORIES = {
 // 取得某類別目前主題的調色盤（6 階色階陣列）
 function getPalette(cat) { return THEMES[CATEGORIES[cat]?.theme || "green"].shades; }
 
+// 台股、美股都只能持有整數股（不像加密貨幣可以有小數顆），這裡統一判斷、統一無條件捨去（不四捨五入,
+// 避免「捨去後花的錢超過原本設定的金額」）
+function isWholeShareCat(cat) { return cat === "stock_tw" || cat === "stock_us"; }
+function roundQty(cat, qty) { return isWholeShareCat(cat) ? Math.floor(qty) : qty; }
+
 const GROUP_ORDER = ["cash","crypto","stock_tw","stock_us"];
 const OTHER_COLOR = "#4b515c";
 const THRESHOLD = 0.03; // 3% 以下併入「其他」
@@ -424,6 +429,14 @@ async function claimRecurringRule(rule, dateString) {
 }
 
 const nf = n => Math.round(n).toLocaleString();
+
+// 台股、美股的持股單位是「整股」，不會有小數股；加密貨幣則本來就可以有小數。
+// 統一在這裡處理，任何會改到 qty 的地方都要經過這個函式，確保不會出現 8.3 股這種不存在的持股狀態。
+// 股票無條件捨去（不是四捨五入）：這樣「定期定額」按預算換算股數時，實際花費一定不超過設定的投入金額。
+function roundQty(value, cat) {
+  const v = Math.max(0, value);
+  return (cat === "stock_tw" || cat === "stock_us") ? Math.floor(v) : +v.toFixed(8);
+}
 
 // 精準量測文字實際渲染寬度（用真實內容+字重+字級去量，不用猜的固定門檻）
 const _measureCtx = document.createElement("canvas").getContext("2d");
@@ -1150,6 +1163,7 @@ function openAdjust(id) {
   const unit=CATEGORIES[a.cat].unit;
   const sub = isCash?`目前 ${nf(a.balance)}`:`持有 ${a.qty} ${unit} · ${nf(valueOf(a))}`;
   let dir="add";
+  const qtyIsWhole = isWholeShareCat(a.cat);
 
   const editFields = isCash
     ? `<div class="field"><div class="field-label">餘額</div>
@@ -1157,10 +1171,10 @@ function openAdjust(id) {
     : `<div class="field"><div class="field-label">代號</div>
          <input class="sm-input" id="eSym" value="${a.symbol||""}"></div>
        <div class="row2">
-         <div class="field" style="flex:1"><div class="field-label">${CATEGORIES[a.cat].qtyLabel}</div>
-           <input class="sm-input" id="eQty" type="number" inputmode="decimal" value="${a.qty}"></div>
+         <div class="field" style="flex:1"><div class="field-label">${CATEGORIES[a.cat].qtyLabel}${qtyIsWhole?"（整股）":""}</div>
+           <input class="sm-input" id="eQty" type="number" inputmode="${qtyIsWhole?"numeric":"decimal"}" ${qtyIsWhole?"":'step="any"'} value="${a.qty}"></div>
          <div class="field" style="flex:1"><div class="field-label">${CATEGORIES[a.cat].priceLabel}</div>
-           <input class="sm-input" id="ePrice" type="number" inputmode="decimal" value="${a.price}"></div>
+           <input class="sm-input" id="ePrice" type="number" inputmode="decimal" step="any" value="${a.price}"></div>
        </div>`;
 
   const sheet=showSheet(`
@@ -1180,7 +1194,7 @@ function openAdjust(id) {
         <button class="dir-btn add on" id="dAdd">＋ 增加</button>
         <button class="dir-btn sub" id="dSub">－ 減少</button>
       </div>
-      <input class="big-input" id="amt" type="number" inputmode="${isCash?"numeric":"decimal"}"
+      <input class="big-input" id="amt" type="number" inputmode="${(isCash||qtyIsWhole)?"numeric":"decimal"}" step="${(isCash||qtyIsWhole)?"1":"any"}"
         placeholder="${isCash?"輸入金額":"輸入數量（"+unit+"）"}" style="border:1.5px solid ${a.color}66">
       ${isCash?`<div class="quick-row">${[1000,5000,10000,50000].map(q=>`<button class="quick-btn" data-q="${q}">${q/1000}k</button>`).join("")}</div>`:""}
       <button class="primary-btn" id="applyBtn" disabled style="background:${a.color};color:#fff">確認</button>
@@ -1206,11 +1220,11 @@ function openAdjust(id) {
       </div>
       <div class="field">
         <div class="field-label">從「${a.name}」扣除（${isCash?"金額":unit}）</div>
-        <input class="sm-input" id="tFrom" type="number" inputmode="${isCash?"numeric":"decimal"}" placeholder="0">
+        <input class="sm-input" id="tFrom" type="number" inputmode="${(isCash||qtyIsWhole)?"numeric":"decimal"}" step="${(isCash||qtyIsWhole)?"1":"any"}" placeholder="0">
       </div>
       <div class="field" id="tToField" style="display:none">
         <div class="field-label" id="tToLabel">轉入數量</div>
-        <input class="sm-input" id="tTo" type="number" inputmode="decimal" placeholder="0">
+        <input class="sm-input" id="tTo" type="number" inputmode="decimal" step="any" placeholder="0">
       </div>
       <button class="primary-btn" id="transferBtn" disabled style="background:${a.color};color:#fff">確認轉出</button>
     </div>
@@ -1268,9 +1282,10 @@ function openAdjust(id) {
       btn.style.background = other.color+"22";
       btn.style.color = "#fff";
       const otherIsCash = other.cat==="cash";
+      const otherIsWhole = isWholeShareCat(other.cat);
       const otherUnit = otherIsCash ? "金額" : CATEGORIES[other.cat].unit;
-      tToLabel.textContent = `轉入「${other.name}」數量（${otherUnit}）`;
-      tTo.setAttribute("inputmode", otherIsCash ? "numeric" : "decimal");
+      tToLabel.textContent = `轉入「${other.name}」數量（${otherUnit}${otherIsWhole?"，整股":""}）`;
+      tTo.setAttribute("inputmode", (otherIsCash||otherIsWhole) ? "numeric" : "decimal");
       tToField.style.display = "block";
       checkTransferReady();
     };
@@ -1280,17 +1295,17 @@ function openAdjust(id) {
   function checkTransferReady(){
     transferBtn.disabled = !(transferTarget && tFrom.value && Number(tFrom.value)>0 && tTo.value && Number(tTo.value)>0);
   }
-  tFrom.oninput=()=>{ if(isCash) tFrom.value=tFrom.value.replace(/[^\d]/g,""); checkTransferReady(); };
-  tTo.oninput=()=>{ checkTransferReady(); };
+  tFrom.oninput=()=>{ if(isCash||qtyIsWhole) tFrom.value=tFrom.value.replace(/[^\d]/g,""); checkTransferReady(); };
+  tTo.oninput=()=>{ if(transferTarget && (transferTarget.cat==="cash"||isWholeShareCat(transferTarget.cat))) tTo.value=tTo.value.replace(/[^\d]/g,""); checkTransferReady(); };
 
   transferBtn.onclick=async ()=>{
     const fromAmt=Number(tFrom.value), toAmt=Number(tTo.value);
     if(!transferTarget || !fromAmt || fromAmt<=0 || !toAmt || toAmt<=0) return;
     if(isCash) a.balance=Math.max(0,a.balance-fromAmt);
-    else a.qty=Math.max(0,+(a.qty-fromAmt).toFixed(8));
+    else a.qty=Math.max(0,roundQty(a.cat, +(a.qty-fromAmt).toFixed(8)));
     const tgt = transferTarget;
     if(tgt.cat==="cash") tgt.balance=(tgt.balance||0)+toAmt;
-    else tgt.qty=+((tgt.qty||0)+toAmt).toFixed(8);
+    else tgt.qty=roundQty(tgt.cat, +((tgt.qty||0)+toAmt).toFixed(8));
     transferBtn.disabled=true; transferBtn.textContent="轉出中…";
     await commitTransfer(a, tgt);
   };
@@ -1302,14 +1317,14 @@ function openAdjust(id) {
   const setDir=d=>{dir=d;dAdd.classList.toggle("on",d==="add");dSub.classList.toggle("on",d==="sub");updateLabel();};
   dAdd.onclick=()=>setDir("add"); dSub.onclick=()=>setDir("sub");
   function updateLabel(){ applyBtn.textContent=(dir==="add"?"增加":"減少")+(isCash?"":" "+unit); }
-  amt.oninput=()=>{ if(isCash) amt.value=amt.value.replace(/[^\d]/g,""); applyBtn.disabled=!amt.value; };
+  amt.oninput=()=>{ if(isCash||qtyIsWhole) amt.value=amt.value.replace(/[^\d]/g,""); applyBtn.disabled=!amt.value; };
   sheet.querySelectorAll(".quick-btn").forEach(b=>b.onclick=()=>{amt.value=b.dataset.q;applyBtn.disabled=false;});
   updateLabel();
   applyBtn.onclick=async ()=>{
     const v=Number(amt.value); if(!v||v<=0) return;
     const sign=dir==="add"?1:-1;
     if(isCash) a.balance=Math.max(0,a.balance+sign*v);
-    else a.qty=Math.max(0,+(a.qty+sign*v).toFixed(8));
+    else a.qty=Math.max(0,roundQty(a.cat, +(a.qty+sign*v).toFixed(8)));
     applyBtn.disabled=true; applyBtn.textContent="儲存中…";
     await commit(a);
   };
@@ -1327,7 +1342,7 @@ function openAdjust(id) {
       const q=sheet.querySelector("#eQty").value;
       const p=sheet.querySelector("#ePrice").value;
       if(sym) a.symbol=sym;
-      if(q!=="") a.qty=Math.max(0,Number(q));
+      if(q!=="") a.qty=Math.max(0,roundQty(a.cat, Number(q)));
       if(p!=="") a.price=Math.max(0,Number(p));
     }
     a.color = pendingColor;
@@ -1428,6 +1443,7 @@ function openAdd() {
     const symPh = cat==="crypto" ? "例：SOL" : cat==="stock_us" ? "例：AAPL" : "例：2330";
     const qtyPh = cat==="crypto" ? "0.05" : "100";
     const pricePh = cat==="crypto" ? "6000000" : "1000";
+    const qtyIsWhole = isWholeShareCat(cat);
     fields.innerHTML = `<div class="expand-note">
       <div class="field"><div class="field-label">名稱</div>
         <input class="sm-input" id="fName" placeholder="${namePh}"></div>
@@ -1435,8 +1451,8 @@ function openAdd() {
         ? `<div class="field"><div class="field-label">初始金額</div><input class="sm-input" id="fBal" type="number" inputmode="numeric" placeholder="0"></div>`
         : `<div class="field"><div class="field-label">代號</div><input class="sm-input" id="fSym" placeholder="${symPh}"></div>
            <div class="row2">
-             <div class="field" style="flex:1"><div class="field-label">${c.qtyLabel}</div><input class="sm-input" id="fQty" type="number" inputmode="decimal" placeholder="${qtyPh}"></div>
-             <div class="field" style="flex:1"><div class="field-label">${c.priceLabel}</div><input class="sm-input" id="fPrice" type="number" inputmode="decimal" placeholder="${pricePh}"></div>
+             <div class="field" style="flex:1"><div class="field-label">${c.qtyLabel}${qtyIsWhole?"（整股）":""}</div><input class="sm-input" id="fQty" type="number" inputmode="${qtyIsWhole?"numeric":"decimal"}" ${qtyIsWhole?"":'step="any"'} placeholder="${qtyPh}"></div>
+             <div class="field" style="flex:1"><div class="field-label">${c.priceLabel}</div><input class="sm-input" id="fPrice" type="number" inputmode="decimal" step="any" placeholder="${pricePh}"></div>
            </div>
            <div class="note-sm">＊之後接即時價 API 後價格會自動更新，你只要維護數量</div>`}
       <button class="primary-btn" id="addConfirm" disabled style="background:#5b8def;color:#fff">新增到資產</button>
@@ -1451,6 +1467,10 @@ function openAdd() {
       confirm.disabled=!ok;
     };
     fields.querySelectorAll("input").forEach(i=>i.oninput=check);
+    if (qtyIsWhole) {
+      const fQtyEl = fields.querySelector("#fQty");
+      if (fQtyEl) fQtyEl.oninput=()=>{ fQtyEl.value=fQtyEl.value.replace(/[^\d]/g,""); check(); };
+    }
     nameEl.focus();
     confirm.onclick=async ()=>{
       const id="a"+Date.now();
@@ -1464,7 +1484,7 @@ function openAdd() {
       } else {
         assets.push({id,cat,name:nameEl.value.trim(),color,order:nextOrder,
           symbol:(fields.querySelector("#fSym").value||nameEl.value).trim(),
-          qty:Number(fields.querySelector("#fQty").value),
+          qty:roundQty(cat, Number(fields.querySelector("#fQty").value)),
           price:Number(fields.querySelector("#fPrice").value)});
       }
       const newA = assets[assets.length-1];
@@ -1589,8 +1609,13 @@ function openAdd() {
       }
       const fromUnit = selFrom.cat==="cash" ? "元" : CATEGORIES[selFrom.cat].unit;
       const toUnit = selTo.cat==="cash" ? "元" : CATEGORIES[selTo.cat].unit;
-      const fromQty = amt/fromUnitPrice, toQty = amt/toUnitPrice;
-      ruleEstimate.textContent = `以目前價格估算：扣約 ${fromQty.toFixed(fromUnitPrice===1?0:6)} ${fromUnit} → 買到約 ${toQty.toFixed(toUnitPrice===1?0:6)} ${toUnit}（實際以執行當天即時價為準）`;
+      let toQty = amt/toUnitPrice;
+      if (isWholeShareCat(selTo.cat)) toQty = Math.floor(toQty); // 股票只能整股，多的錢不扣
+      const actualValue = toQty * toUnitPrice;
+      let fromQty = actualValue/fromUnitPrice;
+      if (isWholeShareCat(selFrom.cat)) fromQty = Math.floor(fromQty);
+      const wholeNote = isWholeShareCat(selTo.cat) ? "（整股，多的零頭不扣）" : "";
+      ruleEstimate.textContent = `以目前價格估算：扣約 ${fromQty.toFixed(fromUnitPrice===1?0:6)} ${fromUnit} → 買到約 ${toQty.toFixed(toUnitPrice===1?0:6)} ${toUnit}${wholeNote}（實際以執行當天即時價為準）`;
     }
 
     function updateLabel() {
@@ -1848,6 +1873,8 @@ function dateStr(d) {
 function addDays(d, n) { const r=new Date(d); r.setDate(r.getDate()+n); return r; }
 
 // 執行一次定期定額的單一次扣款：固定投入金額（台幣），兩邊各自用「執行當下」的即時價換算成要扣/加多少數量。
+// 目標若是股票（台股/美股），只能買整股：先算出這筆錢最多能買到幾整股，再回推「實際花掉多少錢」，
+// 剩下湊不成一股的零頭不扣，留在來源帳戶。來源如果也是股票（少見的股票換股票），一樣不能有零股。
 // 回傳 true=成功執行、false=價格還沒抓到暫時無法換算（跳過這次，下次補執行時再試）
 function applyRecurringOccurrence(rule, from, to) {
   const fromUnitPrice = from.cat==="cash" ? 1 : from.price;
@@ -1856,8 +1883,15 @@ function applyRecurringOccurrence(rule, from, to) {
     console.warn(`定期定額 ${rule.id} 因來源或目標尚無即時價格，暫時跳過這次執行`);
     return false;
   }
-  const fromDelta = rule.amount_twd / fromUnitPrice;
-  const toDelta = rule.amount_twd / toUnitPrice;
+  // 先算目標那邊：股票要整股（無條件捨去），現金/幣可以有小數
+  let toDelta = rule.amount_twd / toUnitPrice;
+  if (isWholeShareCat(to.cat)) toDelta = Math.floor(toDelta);
+
+  // 用「目標實際買到的價值」反推來源要扣多少，這樣多的錢就不會被扣（留在來源帳戶）
+  const actualValue = toDelta * toUnitPrice;
+  let fromDelta = actualValue / fromUnitPrice;
+  if (isWholeShareCat(from.cat)) fromDelta = Math.floor(fromDelta);
+
   if (from.cat==="cash") from.balance = Math.max(0, (from.balance||0)-fromDelta);
   else from.qty = Math.max(0, +((from.qty||0)-fromDelta).toFixed(8));
   if (to.cat==="cash") to.balance = (to.balance||0)+toDelta;
