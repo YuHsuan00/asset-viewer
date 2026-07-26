@@ -238,10 +238,8 @@ const CATEGORIES = {
 // 取得某類別目前主題的調色盤（6 階色階陣列）
 function getPalette(cat) { return THEMES[CATEGORIES[cat]?.theme || "green"].shades; }
 
-// 台股、美股都只能持有整數股（不像加密貨幣可以有小數顆），這裡統一判斷、統一無條件捨去（不四捨五入,
-// 避免「捨去後花的錢超過原本設定的金額」）
+// 台股、美股都只能持有整數股（不像加密貨幣可以有小數顆），這裡統一判斷（roundQty 實際捨去邏輯見下方既有函式）
 function isWholeShareCat(cat) { return cat === "stock_tw" || cat === "stock_us"; }
-function roundQty(cat, qty) { return isWholeShareCat(cat) ? Math.floor(qty) : qty; }
 
 const GROUP_ORDER = ["cash","crypto","stock_tw","stock_us"];
 const OTHER_COLOR = "#4b515c";
@@ -1302,10 +1300,10 @@ function openAdjust(id) {
     const fromAmt=Number(tFrom.value), toAmt=Number(tTo.value);
     if(!transferTarget || !fromAmt || fromAmt<=0 || !toAmt || toAmt<=0) return;
     if(isCash) a.balance=Math.max(0,a.balance-fromAmt);
-    else a.qty=Math.max(0,roundQty(a.cat, +(a.qty-fromAmt).toFixed(8)));
+    else a.qty=Math.max(0,roundQty(+(a.qty-fromAmt).toFixed(8), a.cat));
     const tgt = transferTarget;
     if(tgt.cat==="cash") tgt.balance=(tgt.balance||0)+toAmt;
-    else tgt.qty=roundQty(tgt.cat, +((tgt.qty||0)+toAmt).toFixed(8));
+    else tgt.qty=roundQty(+((tgt.qty||0)+toAmt).toFixed(8), tgt.cat);
     transferBtn.disabled=true; transferBtn.textContent="轉出中…";
     await commitTransfer(a, tgt);
   };
@@ -1324,7 +1322,7 @@ function openAdjust(id) {
     const v=Number(amt.value); if(!v||v<=0) return;
     const sign=dir==="add"?1:-1;
     if(isCash) a.balance=Math.max(0,a.balance+sign*v);
-    else a.qty=Math.max(0,roundQty(a.cat, +(a.qty+sign*v).toFixed(8)));
+    else a.qty=Math.max(0,roundQty(+(a.qty+sign*v).toFixed(8), a.cat));
     applyBtn.disabled=true; applyBtn.textContent="儲存中…";
     await commit(a);
   };
@@ -1342,7 +1340,7 @@ function openAdjust(id) {
       const q=sheet.querySelector("#eQty").value;
       const p=sheet.querySelector("#ePrice").value;
       if(sym) a.symbol=sym;
-      if(q!=="") a.qty=Math.max(0,roundQty(a.cat, Number(q)));
+      if(q!=="") a.qty=Math.max(0,roundQty(Number(q), a.cat));
       if(p!=="") a.price=Math.max(0,Number(p));
     }
     a.color = pendingColor;
@@ -1484,7 +1482,7 @@ function openAdd() {
       } else {
         assets.push({id,cat,name:nameEl.value.trim(),color,order:nextOrder,
           symbol:(fields.querySelector("#fSym").value||nameEl.value).trim(),
-          qty:roundQty(cat, Number(fields.querySelector("#fQty").value)),
+          qty:roundQty(Number(fields.querySelector("#fQty").value), cat),
           price:Number(fields.querySelector("#fPrice").value)});
       }
       const newA = assets[assets.length-1];
