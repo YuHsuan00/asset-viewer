@@ -1,5 +1,6 @@
 {
   "crons": [
-    { "path": "/api/run-recurring", "schedule": "0 1 * * *" }
+    { "path": "/api/run-recurring", "schedule": "0 1 * * *" },
+    { "path": "/api/weekly-snapshot", "schedule": "0 13 * * 5" }
   ]
 }
