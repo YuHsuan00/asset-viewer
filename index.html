@@ -27,6 +27,7 @@
     background: #0b0c10; color: #e8eaed;
     font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", sans-serif;
     overscroll-behavior: none;
+    overflow-x: hidden; /* 防禦性保險：就算有元素意外跑出容器外，也不會讓畫布橫向被拉大 */
   }
   body { display: flex; justify-content: center; }
   #app {
@@ -979,7 +980,18 @@ function applyDragPosition() {
   // 如果拖曳中頁面又自動捲動了卻沒把這段位移算進來，方塊會跟手指對不齊、亂飄。
   const dx = dragState.lastPointerClientX - dragState.startX;
   const dy = (dragState.lastPointerClientY - dragState.startY) + (window.scrollY - dragState.scrollYAtStart);
-  const newLeft = dragState.startLeft + dx, newTop = dragState.startTop + dy;
+  let newLeft = dragState.startLeft + dx, newTop = dragState.startTop + dy;
+
+  // 限制拖曳範圍不能超出方塊區容器本身的邊界，避免方塊被拖到容器外面時，
+  // 瀏覽器誤以為頁面內容變寬/變高，自動生出額外的橫向捲動空間（畫布被拉大）
+  const container = document.getElementById("treemap-inner");
+  if (container) {
+    const maxLeft = Math.max(0, container.clientWidth - dragState.hitW);
+    const maxTop = Math.max(0, container.clientHeight - dragState.hitH);
+    newLeft = Math.min(Math.max(newLeft, 0), maxLeft);
+    newTop = Math.min(Math.max(newTop, 0), maxTop);
+  }
+
   el.style.left = newLeft+"px";
   el.style.top = newTop+"px";
 
