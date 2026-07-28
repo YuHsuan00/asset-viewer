@@ -398,6 +398,31 @@ async function loadNetWorthHistory() {
   }
 }
 
+// 讀近 24 個月「每個資產」自己的每週快照（asset_snapshots 表），供「點進某分類後看子項目走勢」用。
+// 用 asset_id 分組，整理成 { assetId: [{t,v}, ...] } 方便丟進 buildMonthlySeries。
+let assetSnapshotHistory = {};
+async function loadAssetSnapshots() {
+  if (!cloudOn()) return false;
+  try {
+    const since = new Date();
+    since.setMonth(since.getMonth() - 24);
+    const sinceStr = since.toISOString().slice(0,10);
+    const { data, error } = await sb.from("asset_snapshots")
+      .select("asset_id,value,snapshot_date")
+      .gte("snapshot_date", sinceStr)
+      .order("snapshot_date", { ascending: true })
+      .limit(20000);
+    if (error) throw error;
+    const grouped = {};
+    (data||[]).forEach(r => {
+      if (!grouped[r.asset_id]) grouped[r.asset_id] = [];
+      grouped[r.asset_id].push({ t: new Date(r.snapshot_date+"T12:00:00").getTime(), v: Number(r.value) });
+    });
+    assetSnapshotHistory = grouped;
+    return true;
+  } catch(e) { console.warn("每週資產快照載入失敗:", e.message); return false; }
+}
+
 // 手動排版結構（拖曳決定的橫排/直排）存回雲端
 async function saveCategoryLayout(cat) {
   if (!cloudOn()) return;
@@ -1064,14 +1089,15 @@ let chartScrubbing = false;
 //      24 個月內完全沒有任何歷史資料的月份，往前抓不到值時，用「當前值」墊底
 // histExtractor：從一筆歷史快照裡取出「這個系列」的值（沒有資料回傳 null，代表這個點跳過不用）
 // liveValueFn：算出「現在當下」這個系列的即時值，蓋掉最後一個月（本月），讓線的終點永遠反映最新狀態
-function buildMonthlySeries(histExtractor, liveValueFn) {
+// sourceHistory：資料來源陣列（可以是全域淨值歷史 history，也可以是單一資產的每週快照）
+function buildMonthlySeries(sourceHistory, histExtractor, liveValueFn) {
   const now = new Date();
   const months = [];
   for (let i = 23; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     months.push({ y: d.getFullYear(), m: d.getMonth(), label: `${d.getFullYear()}/${d.getMonth()+1}` });
   }
-  const sorted = history
+  const sorted = sourceHistory
     .map(h => ({ t: h.t, v: histExtractor(h) }))
     .filter(h => h.v != null)
     .sort((a,b) => a.t - b.t);
@@ -1163,18 +1189,32 @@ function renderChart() {
     return;
   }
 
-  // 選「總資產」時，把總資產跟四個大分類的線一起疊在同一張圖上比較；
-  // 選個別分類時，只畫那一條
+  // 選「總資產」：總資產(主線) + 四個大分類(淡線) 疊在同一張圖
+  // 選個別分類（例如台股）：那個分類(主線) + 分類底下每個資產各自的走勢(淡線，用資產自己的顏色)
   const showAll = chartSeries === "total";
-  const seriesToShow = showAll ? ["total", ...GROUP_ORDER] : [chartSeries];
+  let lines = []; // 統一格式：{ key, label, color, series, isMain }
+  if (showAll) {
+    lines.push({ key:"total", label:"總資產", color:TOTAL_COLOR,
+      series: buildMonthlySeries(history, h=>h.v, ()=>netWorth()), isMain:true });
+    GROUP_ORDER.forEach(cat=>{
+      const cfg = getChartSeriesConfig(cat);
+      lines.push({ key:cat, label:cfg.label, color:cfg.color,
+        series: buildMonthlySeries(history, cfg.histExtractor, cfg.liveValueFn), isMain:false });
+    });
+  } else {
+    const cat = chartSeries;
+    const cfg = getChartSeriesConfig(cat);
+    lines.push({ key:cat, label:cfg.label, color:cfg.color,
+      series: buildMonthlySeries(history, cfg.histExtractor, cfg.liveValueFn), isMain:true });
+    // 子項目：這個分類底下「目前」每一個資產，各自的走勢（資料來源是每週快照 asset_snapshots）
+    assets.filter(a=>a.cat===cat).forEach(a=>{
+      const assetHist = assetSnapshotHistory[a.id] || [];
+      lines.push({ key:"asset:"+a.id, label:a.name, color:a.color,
+        series: buildMonthlySeries(assetHist, h=>h.v, ()=>valueOf(a)), isMain:false });
+    });
+  }
 
-  const allSeries = {};
-  seriesToShow.forEach(key => {
-    const cfg = getChartSeriesConfig(key);
-    allSeries[key] = buildMonthlySeries(cfg.histExtractor, cfg.liveValueFn);
-  });
-  const n = allSeries[seriesToShow[0]].length;
-
+  const n = lines[0].series.length;
   const W=340, H=168;
   const padL=42, padR=10, padT=14, padB=22;
   const plotW=W-padL-padR, plotH=H-padT-padB;
@@ -1182,7 +1222,7 @@ function renderChart() {
   // Y 軸固定從 0 開始（不是用這條線自己的 min~max），這樣「完全沒有變化的平線」也會停在
   // 該有的高度，不會因為 max===min 被誤判成貼底。只看有資料(非null)的月份算最大值。
   let maxVal = 0;
-  seriesToShow.forEach(key => { allSeries[key].forEach(pt => { if (pt.v!=null && pt.v > maxVal) maxVal = pt.v; }); });
+  lines.forEach(ln => { ln.series.forEach(pt => { if (pt.v!=null && pt.v > maxVal) maxVal = pt.v; }); });
   if (maxVal <= 0) maxVal = 1;
   const yMax = maxVal * 1.12; // 留一點頭部空間，最高點不會頂到圖表邊緣
 
@@ -1198,46 +1238,37 @@ function renderChart() {
   });
   // 畫 X 軸月份標籤（每隔幾個月標一次，避免 24 個全部擠在一起看不清楚）
   const labelStep = Math.ceil(n/6);
-  const labelSeries = allSeries[seriesToShow[0]];
+  const labelSeries = lines[0].series;
   for (let i=0;i<n;i+=labelStep) {
     axisSvg += `<text x="${xAt(i).toFixed(1)}" y="${H-6}" fill="#5b616e" font-size="9" text-anchor="middle">${labelSeries[i].label}</text>`;
   }
 
   // 畫每一條線：沒有資料(null)的月份直接跳過不連線，只從「第一筆真的有資料」的月份開始畫，
-  // 不會像以前那樣把最早的月份誤畫成一條假的平線
+  // 不會像以前那樣把最早的月份誤畫成一條假的平線。
+  // 主線(isMain)：完整不透明、有底色漸層、線比較粗；子項目(分類線 or 個別資產線)：透明度降到 50%、細一點、不加底色。
   let linesSvg = "";
-  const single = seriesToShow.length===1;
-  seriesToShow.forEach(key=>{
-    const s = allSeries[key];
+  lines.forEach(ln=>{
+    const s = ln.series;
     const firstIdx = s.findIndex(pt => pt.v != null);
     if (firstIdx === -1) return; // 完全沒有任何資料，這條線整個跳過不畫
     const validPts = [];
     for (let i=firstIdx; i<n; i++) { if (s[i].v!=null) validPts.push([xAt(i), yAt(s[i].v)]); }
+    if (validPts.length < 2) return; // 只有一個點畫不出線，跳過（會在手勢查值時仍看得到這個點）
     const line = smoothPath(validPts);
-    let col;
-    if (key==="total") col = TOTAL_COLOR;
-    else col = getChartSeriesConfig(key).color;
-    // 單獨檢視某分類時保留原本的漲跌配色給總資產專用邏輯（只有總資產單獨顯示時才用漲綠跌橘）
-    if (single && key==="total") {
-      const validVals = validPts.length ? [s[firstIdx].v, s[n-1].v] : [0,0];
-      const up = validVals[1] >= validVals[0];
-      col = up ? "#3fb07a" : "#e8804a";
-    }
+    const col = ln.color;
     const last = validPts[validPts.length-1];
-    // 多線疊圖時（總資產檢視模式），分類線調淡一點，讓總資產那條白色主線更突出，
-    // 又能同時看到分類線大致的相對走勢
-    const lineOpacity = (!single && key!=="total") ? 0.5 : 1;
-    if (single) {
+    const opacity = ln.isMain ? 1 : 0.5;
+    if (ln.isMain) {
       const area = line + ` L${last[0].toFixed(1)} ${(H-padB).toFixed(1)} L${validPts[0][0].toFixed(1)} ${(H-padB).toFixed(1)} Z`;
-      linesSvg += `<defs><linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
+      linesSvg += `<defs><linearGradient id="grad-${ln.key.replace(/[^a-zA-Z0-9]/g,'')}" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="${col}" stop-opacity="0.28"/>
         <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
       </linearGradient></defs>
-      <path d="${area}" fill="url(#grad)"/>`;
+      <path d="${area}" fill="url(#grad-${ln.key.replace(/[^a-zA-Z0-9]/g,'')})"/>`;
     }
-    const strokeW = key==="total" ? 3 : 2;
-    linesSvg += `<path d="${line}" fill="none" stroke="${col}" stroke-width="${strokeW}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="${lineOpacity}"/>`;
-    linesSvg += `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="${key==='total'?4:3}" fill="${col}" fill-opacity="${lineOpacity}"/>`;
+    const strokeW = ln.isMain ? 3 : 1.75;
+    linesSvg += `<path d="${line}" fill="none" stroke="${col}" stroke-width="${strokeW}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="${opacity}"/>`;
+    linesSvg += `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="${ln.isMain?4:2.5}" fill="${col}" fill-opacity="${opacity}"/>`;
   });
 
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
@@ -1245,7 +1276,7 @@ function renderChart() {
   document.getElementById("chartRange").textContent = `${labelSeries[0].label} – ${labelSeries[n-1].label}`;
 
   // 記住這次渲染的座標換算方式，供手勢滑動查值使用（見 updateChartScrub）
-  lastChartLayout = { W, H, padL, padR, padT, padB, n, xAt, yAt, seriesToShow, allSeries, labelSeries, single };
+  lastChartLayout = { W, H, padL, padR, padT, padB, n, xAt, yAt, lines, labelSeries };
 }
 
 // ── 圖表手勢查值：手指在圖上滑動，顯示十字線 + 該時間點的實際數字（參考股票 K 線圖的價格查看手勢）──
@@ -1261,7 +1292,7 @@ function updateChartScrub(clientX) {
   const svgEl = document.getElementById("sparkline");
   const rect = svgEl.getBoundingClientRect();
   if (!rect.width) return;
-  const { W, H, padL, padR, padT, padB, n, xAt, yAt, seriesToShow, allSeries, labelSeries } = lastChartLayout;
+  const { W, H, padL, padR, padT, padB, n, xAt, yAt, lines, labelSeries } = lastChartLayout;
 
   // 手指的螢幕座標換算成 SVG 內部座標系（viewBox 跟實際渲染像素大小不一定一樣）
   const relX = (clientX - rect.left) / rect.width * W;
@@ -1273,26 +1304,23 @@ function updateChartScrub(clientX) {
   const g = document.getElementById("scrubLayer");
   if (!g) return;
   let content = `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${H-padB}" stroke="#8a94a6" stroke-width="1" stroke-dasharray="3,3" stroke-opacity="0.5"/>`;
-  seriesToShow.forEach(key=>{
-    const pt = allSeries[key][idx];
+  lines.forEach(ln=>{
+    const pt = ln.series[idx];
     if (pt.v == null) return; // 這個月這條線沒有資料，不畫點
     const y = yAt(pt.v);
-    const col = key==="total" ? "#e8eaed" : getChartSeriesConfig(key).color;
-    content += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.5" fill="${col}" stroke="#0e0f13" stroke-width="1.5"/>`;
+    content += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.5" fill="${ln.color}" stroke="#0e0f13" stroke-width="1.5"/>`;
   });
   g.innerHTML = content;
 
   // 文字用 HTML 顯示（比 SVG text 好排版、好讀）
   const tip = document.getElementById("chartTooltip");
   if (tip) {
-    const rows = seriesToShow.map(key=>{
-      const pt = allSeries[key][idx];
+    const rows = lines.map(ln=>{
+      const pt = ln.series[idx];
       if (pt.v == null) return "";
-      const col = key==="total" ? "#e8eaed" : getChartSeriesConfig(key).color;
-      const label = key==="total" ? "總資產" : CATEGORIES[key].label;
       return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0">
-        <span style="width:7px;height:7px;border-radius:50%;background:${col};flex-shrink:0"></span>
-        <span style="color:#8a94a6;font-size:11px">${label}</span>
+        <span style="width:7px;height:7px;border-radius:50%;background:${ln.color};flex-shrink:0"></span>
+        <span style="color:#8a94a6;font-size:11px">${ln.label}</span>
         <span style="margin-left:auto;color:#e8eaed;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums">${nf(pt.v)}</span>
       </div>`;
     }).join("");
@@ -2204,6 +2232,7 @@ async function boot() {
       await withTimeout(loadRecurringRules(), 15000, "定期定額載入");
       await withTimeout(runDueRecurringRules(), 15000, "定期定額補執行");
       const gotHistory = await withTimeout(loadNetWorthHistory(), 15000, "歷史載入");
+      await withTimeout(loadAssetSnapshots(), 15000, "每週資產快照載入");
       // 雲端還沒有任何歷史點（例如第一次啟用同步）：補記目前這筆，讓折線圖有起點
       if (!gotHistory || history.length===0) {
         pushHistory();
