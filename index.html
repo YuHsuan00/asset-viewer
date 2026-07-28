@@ -42,7 +42,11 @@
     padding: 30px 16px 18px;
   }
   .eyebrow { font-size: 11px; letter-spacing: 3px; color: #6b7280; margin-bottom: 8px; }
+  .networth-row { display: flex; align-items: center; gap: 10px; }
   .networth { font-size: 40px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
+  .eye-btn { background: none; border: none; color: #5b616e; padding: 4px; cursor: pointer; display: flex; align-items: center; margin-top: 6px; }
+  .eye-btn:active { transform: scale(.92); }
+  .eye-btn.off { color: #3a3f4a; }
   .subline { font-size: 12px; color: #5b616e; margin-top: 4px; }
   .price-status-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
   .price-status { font-size: 11px; color: #5b616e; }
@@ -188,7 +192,14 @@
   <div class="topbar">
     <div>
       <div class="eyebrow">淨資產 TWD</div>
-      <div class="networth" id="networth">0</div>
+      <div class="networth-row">
+        <div class="networth" id="networth">0</div>
+        <button class="eye-btn" id="eyeBtn" title="隱藏／顯示金額">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="eyeIcon">
+            <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      </div>
       <div class="subline" id="subline"></div>
       <div class="price-status-row">
         <span class="price-status" id="priceStatus">—</span>
@@ -200,19 +211,10 @@
     <button class="addbtn" id="addBtn">+</button>
   </div>
 
+  <!-- 上區：資產方塊 -->
   <div id="treemap"><div id="treemap-inner"></div></div>
 
-  <div class="wrap">
-    <div class="section-label" style="display:flex;align-items:center;justify-content:space-between">
-      <span>組成</span>
-      <button class="mode-btn" id="freeModeBtn" title="自由排列：關閉同類別限制">
-        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
-        <span>自由排列</span>
-      </button>
-    </div>
-    <div id="legend"></div>
-  </div>
-
+  <!-- 中區：資產變化圖表 -->
   <div class="chart-card">
     <div class="chart-head">
       <span class="chart-title">資產變化</span>
@@ -223,6 +225,18 @@
       <svg id="sparkline" viewBox="0 0 340 168" preserveAspectRatio="none"></svg>
       <div class="chart-tooltip" id="chartTooltip" style="display:none"></div>
     </div>
+  </div>
+
+  <!-- 下區：詳細資產數字 -->
+  <div class="wrap">
+    <div class="section-label" style="display:flex;align-items:center;justify-content:space-between">
+      <span>組成</span>
+      <button class="mode-btn" id="freeModeBtn" title="自由排列：關閉同類別限制">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+        <span>自由排列</span>
+      </button>
+    </div>
+    <div id="legend"></div>
   </div>
 </div>
 
@@ -878,6 +892,44 @@ const MOVE_CANCEL_PX = 10; // 長按計時器觸發前，手指移動超過這�
 // 不管有沒有確實觸發收尾，都不會有「監聽器疊加」的問題。
 let dragState = null; // null = 目前沒有任何方塊在被按住/拖曳
 
+// 拖曳位置更新節流：DOM 寫入節流到「每個動畫影格最多一次」（用 requestAnimationFrame），
+// 不要每次 pointermove 事件一觸發就馬上寫 DOM——這是主流拖曳套件（dnd-kit、Framer Motion 等）
+// 常見的做法，觸控取樣頻率常常比螢幕更新頻率高，直接每次事件都寫 DOM 反而容易卡頓。
+let dragRAF = null;
+function scheduleDragUpdate() {
+  if (dragRAF != null) return;
+  dragRAF = requestAnimationFrame(() => { dragRAF = null; applyDragPosition(); });
+}
+
+// 邊緣自動捲動：拖曳中手指靠近螢幕上/下邊緣時，頁面會自動朝那個方向微幅捲動，
+// 這樣才能把方塊拖到目前看不到、需要捲動才能看到的位置——這是 Trello、Notion 等
+// 主流拖放介面的標準做法，之前完全沒做，才會「拿起方塊後在可視範圍內卡住」。
+const EDGE_ZONE = 72;        // 距離螢幕上/下邊緣多少像素以內，開始自動捲動
+const MAX_SCROLL_SPEED = 15; // 最靠近邊緣時，每個影格捲動的最大像素數（離邊緣越近，捲越快）
+let autoScrollRAF = null;
+
+function autoScrollLoop() {
+  if (!dragState || !dragState.dragActive) { autoScrollRAF = null; return; }
+  const y = dragState.lastPointerClientY;
+  const vh = window.innerHeight;
+  let dy = 0;
+  if (y < EDGE_ZONE) dy = -MAX_SCROLL_SPEED * (1 - Math.max(0,y)/EDGE_ZONE);
+  else if (y > vh - EDGE_ZONE) dy = MAX_SCROLL_SPEED * (1 - Math.max(0, vh-y)/EDGE_ZONE);
+  if (dy !== 0) {
+    window.scrollBy(0, dy);
+    applyDragPosition(); // 頁面捲動了，就算手指沒動，方塊位置也要立刻跟著同步，不能只靠 pointermove 觸發
+    autoScrollRAF = requestAnimationFrame(autoScrollLoop);
+  } else {
+    autoScrollRAF = null; // 手指已經離開邊緣區，停止自動捲動迴圈
+  }
+}
+function maybeStartAutoScroll() {
+  if (autoScrollRAF != null || !dragState) return;
+  const y = dragState.lastPointerClientY;
+  const vh = window.innerHeight;
+  if (y < EDGE_ZONE || y > vh - EDGE_ZONE) autoScrollRAF = requestAnimationFrame(autoScrollLoop);
+}
+
 function resetDragState() {
   if (dragState) {
     clearTimeout(dragState.timer);
@@ -885,6 +937,8 @@ function resetDragState() {
     dragState.el.style.zIndex = "";
     dragState.el.style.transition = "";
   }
+  if (autoScrollRAF != null) { cancelAnimationFrame(autoScrollRAF); autoScrollRAF = null; }
+  if (dragRAF != null) { cancelAnimationFrame(dragRAF); dragRAF = null; }
   draggingId = null;
   dragState = null;
 }
@@ -910,31 +964,20 @@ function applyIntent(cat, assetId, intent) {
   }
 }
 
-function globalPointerMove(e) {
-  if (!dragState) return;
+// 真正套用拖曳中方塊的新位置＋判斷疊在哪個目標上。抽成獨立函式，讓 pointermove 事件
+// 跟自動捲動迴圈都能呼叫（兩者都可能需要「重新算一次位置」：手指移動、或頁面自動捲動）。
+function applyDragPosition() {
+  if (!dragState || !dragState.dragActive) return;
   const { el, assetRef } = dragState;
   const a = assets.find(x=>x.id===assetRef.id);
   if (!a) { resetDragState(); return; }
 
-  if (!dragState.dragActive) {
-    // 這個階段完全不呼叫 preventDefault、不手動操作 scroll——.tile 已設 touch-action:pan-y，
-    // 讓瀏覽器原生處理垂直捲動（順、不會跟自己寫的邏輯打架，之前手動 window.scrollBy() 那版
-    // 會跟瀏覽器原生捲動機制互搶，變成「推一下、彈回來」的抖動）。
-    // 這裡只是持續監看移動量：一旦超過無反應區門檻，代表使用者是要滑動頁面、不是要長按，
-    // 取消長按計時器即可，捲動本身完全不用我們插手。
-    if (!dragState.scrolling) {
-      const dx0 = e.clientX-dragState.startX, dy0=e.clientY-dragState.startY;
-      if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) {
-        clearTimeout(dragState.timer); dragState.timer=null;
-        dragState.scrolling = true;
-      }
-    }
-    return;
-  }
-
-  e.preventDefault();
-  const dx = e.clientX-dragState.startX, dy = e.clientY-dragState.startY;
-  const newLeft = dragState.startLeft+dx, newTop = dragState.startTop+dy;
+  // dx/dy 是「文件座標系」下的位移量：手指在螢幕上的位移 + 這段期間頁面額外捲動的量。
+  // 一定要把捲動量加進去——方塊的 left/top 是相對「文件」而不是相對「螢幕」，
+  // 如果拖曳中頁面又自動捲動了卻沒把這段位移算進來，方塊會跟手指對不齊、亂飄。
+  const dx = dragState.lastPointerClientX - dragState.startX;
+  const dy = (dragState.lastPointerClientY - dragState.startY) + (window.scrollY - dragState.scrollYAtStart);
+  const newLeft = dragState.startLeft + dx, newTop = dragState.startTop + dy;
   el.style.left = newLeft+"px";
   el.style.top = newTop+"px";
 
@@ -964,6 +1007,32 @@ function globalPointerMove(e) {
   applyIntent(layoutKey(a), a.id, intent);
   dragState.layoutTouched = true;
   renderTreemap(); // 其他方塊依新結構平滑重新排列、讓位；拖曳中的方塊也會跟著變形（見 dragging 的 transition 設定）
+}
+
+function globalPointerMove(e) {
+  if (!dragState) return;
+  dragState.lastPointerClientX = e.clientX;
+  dragState.lastPointerClientY = e.clientY;
+
+  if (!dragState.dragActive) {
+    // 這個階段完全不呼叫 preventDefault、不手動操作 scroll——.tile 已設 touch-action:pan-y，
+    // 讓瀏覽器原生處理垂直捲動（順、不會跟自己寫的邏輯打架，之前手動 window.scrollBy() 那版
+    // 會跟瀏覽器原生捲動機制互搶，變成「推一下、彈回來」的抖動）。
+    // 這裡只是持續監看移動量：一旦超過無反應區門檻，代表使用者是要滑動頁面、不是要長按，
+    // 取消長按計時器即可，捲動本身完全不用我們插手。
+    if (!dragState.scrolling) {
+      const dx0 = e.clientX-dragState.startX, dy0=e.clientY-dragState.startY;
+      if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) {
+        clearTimeout(dragState.timer); dragState.timer=null;
+        dragState.scrolling = true;
+      }
+    }
+    return;
+  }
+
+  e.preventDefault();
+  scheduleDragUpdate();   // DOM 寫入節流到下一個動畫影格
+  maybeStartAutoScroll(); // 手指若已經在邊緣區，啟動自動捲動迴圈
 }
 
 function globalPointerUp() {
@@ -1012,8 +1081,10 @@ function attachTileInteraction(el, assetRef) {
     dragState = {
       el, assetRef,
       startX: e.clientX, startY: e.clientY,
+      lastPointerClientX: e.clientX, lastPointerClientY: e.clientY,
       startLeft: parseFloat(el.style.left)||0,
       startTop: parseFloat(el.style.top)||0,
+      scrollYAtStart: window.scrollY, // 記下拖曳開始當時的捲動位置，供後續計算「這段期間頁面額外捲動了多少」
       dragActive: false,
       scrolling: false, // 是否已確認這次手勢是「滑動頁面」（純粹用來標記不是點擊，捲動本身交給瀏覽器原生處理）
       hitW: 0, hitH: 0, // 判定用的固定尺寸（拿起來那一刻凍結）
@@ -1039,9 +1110,13 @@ function attachTileInteraction(el, assetRef) {
 }
 
 // ── 淨資產數字動畫 ──
+let netWorthHidden = false;
+try { netWorthHidden = localStorage.getItem("assel_nwHidden") === "1"; } catch(e) {}
+
 function animateNetWorth(to) {
-  const from = animatedNW, dur=550, t0=performance.now();
   const el=document.getElementById("networth");
+  if (netWorthHidden) { el.textContent = "•••••••"; animatedNW = to; return; }
+  const from = animatedNW, dur=550, t0=performance.now();
   function tick(t){
     const p=Math.min((t-t0)/dur,1);
     const e=1-Math.pow(1-p,3);
@@ -1370,7 +1445,8 @@ async function commitTransfer(fromAsset, toAsset) {
 function renderAll(animate=true) {
   renderTreemap(); renderLegend(); renderChart();
   const nw=netWorth();
-  if(animate) animateNetWorth(nw); else { document.getElementById("networth").textContent=nf(nw); animatedNW=nw; }
+  if(animate) animateNetWorth(nw);
+  else { document.getElementById("networth").textContent = netWorthHidden ? "•••••••" : nf(nw); animatedNW=nw; }
   document.getElementById("subline").textContent = `${assets.length} 項資產`;
 }
 
@@ -1889,6 +1965,22 @@ function openAdd() {
 }
 
 document.getElementById("addBtn").onclick=openAdd;
+
+const eyeBtn = document.getElementById("eyeBtn");
+const eyeIcon = document.getElementById("eyeIcon");
+function updateEyeIcon() {
+  eyeBtn.classList.toggle("off", netWorthHidden);
+  eyeIcon.innerHTML = netWorthHidden
+    ? `<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><line x1="2" y1="2" x2="22" y2="22"/>`
+    : `<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>`;
+}
+updateEyeIcon();
+eyeBtn.onclick = () => {
+  netWorthHidden = !netWorthHidden;
+  try { localStorage.setItem("assel_nwHidden", netWorthHidden ? "1" : "0"); } catch(e) {}
+  updateEyeIcon();
+  document.getElementById("networth").textContent = netWorthHidden ? "•••••••" : nf(animatedNW);
+};
 document.getElementById("refreshBtn").onclick=()=>refreshPrices(false);
 
 // 圖表手勢查值：長按/拖曳圖表任一處，跟手顯示十字線與該時間點的數字；放開手指恢復正常顯示
