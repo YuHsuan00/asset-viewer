@@ -66,13 +66,15 @@
   #treemap-inner { position: relative; width: 100%; height: 100%; }
   .tile {
     position: absolute; padding: 3.5px; cursor: pointer;
-    touch-action: pan-y; /* 平常讓瀏覽器原生處理垂直捲動（順、不會跟自己寫的邏輯打架），
-                             只有真正判定成拖曳時才用 e.preventDefault() 介入接管，見 globalPointerMove */
+    /* touch-action 一定要一開始就是 none，不能「先 pan-y、長按後才切成 none」——
+       瀏覽器是在手指剛觸碰的那一刻就決定好怎麼處理這個手勢，事後用 class 切換不會生效，
+       瀏覽器依然會照最初的判斷繼續把移動當成頁面捲動處理，這正是「拖曳時方塊被頁面捲動搶走」的成因。
+       改成從頭到尾都是 none，完全不讓瀏覽器插手，捲動改成我們自己在 globalPointerMove 手動模擬。 */
+    touch-action: none;
     transition: left .55s cubic-bezier(.34,1.15,.4,1), top .55s cubic-bezier(.34,1.15,.4,1),
                 width .55s cubic-bezier(.34,1.15,.4,1), height .55s cubic-bezier(.34,1.15,.4,1);
   }
   .tile.dragging {
-    touch-action: none;
     cursor: grabbing;
   }
   .tile.dragging .tile-inner {
@@ -1015,18 +1017,24 @@ function globalPointerMove(e) {
   dragState.lastPointerClientY = e.clientY;
 
   if (!dragState.dragActive) {
-    // 這個階段完全不呼叫 preventDefault、不手動操作 scroll——.tile 已設 touch-action:pan-y，
-    // 讓瀏覽器原生處理垂直捲動（順、不會跟自己寫的邏輯打架，之前手動 window.scrollBy() 那版
-    // 會跟瀏覽器原生捲動機制互搶，變成「推一下、彈回來」的抖動）。
-    // 這裡只是持續監看移動量：一旦超過無反應區門檻，代表使用者是要滑動頁面、不是要長按，
-    // 取消長按計時器即可，捲動本身完全不用我們插手。
+    // .tile 現在一律是 touch-action:none（瀏覽器完全不會插手任何捲動），
+    // 所以「長按判定前、看起來像滑頁面」的這段，捲動要靠我們自己模擬。
+    // 先在無反應區內完全不做任何事（不捲動、不取消長按計時），
+    // 避免手拿著手機的自然手震被誤判成「要捲動」而讓畫面抖動；
+    // 超過門檻後才確定是滑動意圖，開始手動跟手捲動。
+    const dx0 = e.clientX-dragState.startX, dy0=e.clientY-dragState.startY;
     if (!dragState.scrolling) {
-      const dx0 = e.clientX-dragState.startX, dy0=e.clientY-dragState.startY;
       if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) {
         clearTimeout(dragState.timer); dragState.timer=null;
         dragState.scrolling = true;
+        dragState.lastScrollY = e.clientY; // 從超過門檻的這一刻開始才手動捲動，之後跟手捲動
       }
+      return;
     }
+    e.preventDefault();
+    const dyFrame = e.clientY - dragState.lastScrollY;
+    dragState.lastScrollY = e.clientY;
+    window.scrollBy(0, -dyFrame);
     return;
   }
 
