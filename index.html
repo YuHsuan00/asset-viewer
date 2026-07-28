@@ -128,10 +128,6 @@
   .chart-card { margin: 8px 16px 0; padding: 18px 16px 12px; background: #101218; border-radius: 18px; border: 1px solid #1a1c23; }
   .chart-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 14px; }
   .chart-title { font-size: 13px; color: #a7adb8; font-weight: 600; }
-  .chart-series-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-  .chart-series-btn { border: 1.5px solid #23252e; background: #16181f; color: #8a94a6; border-radius: 20px; padding: 5px 12px; font-size: 11.5px; font-weight: 600; cursor: pointer; transition: all .12s; display: flex; align-items: center; gap: 5px; }
-  .chart-series-btn .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .chart-series-btn.on { border-color: currentColor; }
   .chart-range { font-size: 11px; color: #5b616e; }
   #sparkline { width: 100%; height: 120px; display: block; }
 
@@ -213,7 +209,6 @@
       <span class="chart-title">資產變化</span>
       <span class="chart-range" id="chartRange">近期</span>
     </div>
-    <div class="chart-series-row" id="chartSeriesRow"></div>
     <svg id="sparkline" viewBox="0 0 340 120" preserveAspectRatio="none"></svg>
   </div>
 </div>
@@ -242,9 +237,6 @@ const CATEGORIES = {
 };
 // 取得某類別目前主題的調色盤（6 階色階陣列）
 function getPalette(cat) { return THEMES[CATEGORIES[cat]?.theme || "green"].shades; }
-
-// 台股、美股都只能持有整數股（不像加密貨幣可以有小數顆），這裡統一判斷（roundQty 實際捨去邏輯見下方既有函式）
-function isWholeShareCat(cat) { return cat === "stock_tw" || cat === "stock_us"; }
 
 const GROUP_ORDER = ["cash","crypto","stock_tw","stock_us"];
 const OTHER_COLOR = "#4b515c";
@@ -334,60 +326,29 @@ async function deleteAssetFromCloud(id) {
 }
 
 // 淨值歷史：存一筆快照到雲端（供折線圖跨裝置同步）
-// 存一筆淨值快照，順便記下「當下每個大分類各自的總值」，供分類走勢圖用。
-// 不用另開資料表、也不會多花寫入次數——反正快照本來就會在每次資產異動時觸發，
-// 直接把分類明細一起塞進同一筆就好。
-// 防呆：如果 Supabase 那邊還沒加 breakdown 欄位（migration 還沒跑），連 breakdown 一起存會整筆失敗，
-// 這裡失敗後會自動退回「只存總資產」，不讓新功能的欄位缺失拖累本來就在運作的核心記錄功能。
 async function saveNetWorthSnapshot(value) {
   if (!cloudOn()) return;
-  const breakdown = {};
-  GROUP_ORDER.forEach(cat => {
-    breakdown[cat] = assets.filter(a=>a.cat===cat).reduce((s,a)=>s+valueOf(a),0);
-  });
-  try {
-    const { error } = await sb.from("net_worth_history").insert({ value, breakdown });
-    if (error) throw error;
-  } catch(e) {
-    console.warn("含分類明細的快照儲存失敗，改用只存總資產：", e.message);
-    try { await sb.from("net_worth_history").insert({ value }); }
-    catch(e2) { console.warn("歷史快照儲存失敗:", e2.message); }
-  }
+  try { await sb.from("net_worth_history").insert({ value }); }
+  catch(e) { console.warn("歷史快照儲存失敗:", e.message); }
 }
 
-// 讀近 24 個月的淨值歷史（供月折線圖），連分類明細一起帶回
-// 防呆：breakdown 欄位若還不存在，連 select 都會整批失敗，這裡失敗後退回只選 value，
-// 這樣至少「總資產」那條線還能正常讀到資料，不會被新欄位缺失拖累。
+// 讀近 24 個月的淨值歷史（供月折線圖）
 async function loadNetWorthHistory() {
   if (!cloudOn()) return false;
-  const since = new Date();
-  since.setMonth(since.getMonth() - 24);
   try {
+    const since = new Date();
+    since.setMonth(since.getMonth() - 24);
     const { data, error } = await sb.from("net_worth_history")
-      .select("value,breakdown,created_at")
+      .select("value,created_at")
       .gte("created_at", since.toISOString())
       .order("created_at", { ascending: true })
       .limit(5000);
     if (error) throw error;
     if (data && data.length) {
-      history = data.map(r => ({ v: Number(r.value), b: r.breakdown||null, t: new Date(r.created_at).getTime() }));
+      history = data.map(r => ({ v: Number(r.value), t: new Date(r.created_at).getTime() }));
     }
     return true;
-  } catch(e) {
-    console.warn("含分類明細的歷史載入失敗，改用只讀總資產：", e.message);
-    try {
-      const { data, error } = await sb.from("net_worth_history")
-        .select("value,created_at")
-        .gte("created_at", since.toISOString())
-        .order("created_at", { ascending: true })
-        .limit(5000);
-      if (error) throw error;
-      if (data && data.length) {
-        history = data.map(r => ({ v: Number(r.value), b: null, t: new Date(r.created_at).getTime() }));
-      }
-      return true;
-    } catch(e2) { console.warn("歷史載入失敗:", e2.message); return false; }
-  }
+  } catch(e) { console.warn("歷史載入失敗:", e.message); return false; }
 }
 
 // 手動排版結構（拖曳決定的橫排/直排）存回雲端
@@ -463,14 +424,6 @@ async function claimRecurringRule(rule, dateString) {
 }
 
 const nf = n => Math.round(n).toLocaleString();
-
-// 台股、美股的持股單位是「整股」，不會有小數股；加密貨幣則本來就可以有小數。
-// 統一在這裡處理，任何會改到 qty 的地方都要經過這個函式，確保不會出現 8.3 股這種不存在的持股狀態。
-// 股票無條件捨去（不是四捨五入）：這樣「定期定額」按預算換算股數時，實際花費一定不超過設定的投入金額。
-function roundQty(value, cat) {
-  const v = Math.max(0, value);
-  return (cat === "stock_tw" || cat === "stock_us") ? Math.floor(v) : +v.toFixed(8);
-}
 
 // 精準量測文字實際渲染寬度（用真實內容+字重+字級去量，不用猜的固定門檻）
 const _measureCtx = document.createElement("canvas").getContext("2d");
@@ -1046,54 +999,34 @@ function renderLegend() {
   });
 }
 
-// ── 折線圖：近 24 個月，月度聚合 + 平滑曲線，可切換看總資產或個別大分類 ──
-let chartSeries = "total"; // "total" | "cash" | "crypto" | "stock_tw" | "stock_us"
+// ── 折線圖：近 24 個月，月度聚合 + 平滑曲線 ──
 
 // 把逐筆變動紀錄聚合成「近 24 個月，每月一個點」
-// 規則：每月取「當月最後一筆」的值；該月沒有變動就沿用前一個有資料的月份（forward-fill）
-//      24 個月內完全沒有任何歷史資料的月份，往前抓不到值時，用「當前值」墊底
-// histExtractor：從一筆歷史快照裡取出「這個系列」的值（沒有資料回傳 null，代表這個點跳過不用）
-// liveValueFn：算出「現在當下」這個系列的即時值，蓋掉最後一個月（本月），讓線的終點永遠反映最新狀態
-function buildMonthlySeries(histExtractor, liveValueFn) {
+// 規則：每月取「當月最後一筆」的淨值；該月沒有變動就沿用前一個有資料的月份（forward-fill）
+//      24 個月內完全沒有任何歷史資料的月份，往前抓不到值時，用「當前淨值」墊底
+function buildMonthlySeries() {
   const now = new Date();
   const months = [];
   for (let i = 23; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     months.push({ y: d.getFullYear(), m: d.getMonth(), label: `${d.getFullYear()}/${d.getMonth()+1}` });
   }
-  const sorted = history
-    .map(h => ({ t: h.t, v: histExtractor(h) }))
-    .filter(h => h.v != null)
-    .sort((a,b) => a.t - b.t);
+  // 依時間排序，準備逐月掃描
+  const sorted = [...history].sort((a,b) => a.t - b.t);
   let idx = 0;
-  let lastVal = sorted.length ? sorted[0].v : liveValueFn();
+  let lastVal = sorted.length ? sorted[0].v : netWorth();
   const series = months.map(mo => {
-    const monthEndTime = new Date(mo.y, mo.m + 1, 1).getTime() - 1;
+    const monthEndTime = new Date(mo.y, mo.m + 1, 1).getTime() - 1; // 該月最後一毫秒
+    // 把所有落在這個月（含）之前、還沒用過的點都吃進來，取最後一筆當代表
     while (idx < sorted.length && sorted[idx].t <= monthEndTime) {
       lastVal = sorted[idx].v;
       idx++;
     }
     return { ...mo, v: lastVal };
   });
-  if (series.length) series[series.length-1].v = liveValueFn();
+  // 最後一個月（本月）用「當前即時淨值」覆蓋，讓線的終點永遠反映最新狀態
+  if (series.length) series[series.length-1].v = netWorth();
   return series;
-}
-
-// 依目前選的系列，回傳 { histExtractor, liveValueFn, color, label }
-function getChartSeriesConfig(key) {
-  if (key === "total") {
-    return {
-      histExtractor: h => h.v,
-      liveValueFn: () => netWorth(),
-      label: "總資產",
-    };
-  }
-  return {
-    histExtractor: h => (h.b && h.b[key] != null) ? Number(h.b[key]) : null,
-    liveValueFn: () => assets.filter(a=>a.cat===key).reduce((s,a)=>s+valueOf(a),0),
-    label: CATEGORIES[key].label,
-    color: getPalette(key)[2], // 用該分類色系中間深淺的一階，跟 treemap 方塊顏色呼應
-  };
 }
 
 // Catmull-Rom → 平滑貝茲曲線路徑，讓折線圖絲滑不生硬
@@ -1117,22 +1050,7 @@ function smoothPath(pts) {
 
 function renderChart() {
   const svg=document.getElementById("sparkline");
-  const seriesRow=document.getElementById("chartSeriesRow");
   const W=340,H=120,pad=10;
-
-  // 渲染切換按鈕（總資產 + 4 個大分類），只在還沒建立過、或資產類別組成變化時重繪按鈕本身
-  const seriesKeys = ["total", ...GROUP_ORDER];
-  seriesRow.innerHTML = seriesKeys.map(key=>{
-    const cfg = getChartSeriesConfig(key);
-    const dotColor = key==="total" ? "#8a94a6" : cfg.color;
-    const on = chartSeries===key;
-    return `<button class="chart-series-btn ${on?'on':''}" data-key="${key}" style="color:${on?dotColor:'#8a94a6'}">
-      <span class="dot" style="background:${dotColor}"></span>${cfg.label}
-    </button>`;
-  }).join("");
-  seriesRow.querySelectorAll(".chart-series-btn").forEach(btn=>{
-    btn.onclick=()=>{ chartSeries=btn.dataset.key; renderChart(); };
-  });
 
   if (history.length===0) {
     svg.innerHTML=`<text x="${W/2}" y="${H/2}" fill="#4b515c" font-size="12" text-anchor="middle">調整資產後這裡會顯示走勢</text>`;
@@ -1140,8 +1058,7 @@ function renderChart() {
     return;
   }
 
-  const cfg = getChartSeriesConfig(chartSeries);
-  const series = buildMonthlySeries(cfg.histExtractor, cfg.liveValueFn);
+  const series = buildMonthlySeries();
   const vals = series.map(s=>s.v);
   const min=Math.min(...vals), max=Math.max(...vals);
   const range=max-min||1;
@@ -1155,14 +1072,8 @@ function renderChart() {
   const line = smoothPath(pts);
   const last = pts[pts.length-1];
   const area = line + ` L${last[0].toFixed(1)} ${H-pad} L${pts[0][0].toFixed(1)} ${H-pad} Z`;
-  // 總資產：照漲跌決定顏色（綠漲橘跌）；個別分類：固定用該分類的主題色，讓視覺跟 treemap 方塊一致
-  let col;
-  if (chartSeries==="total") {
-    const up = vals[vals.length-1] >= vals[0];
-    col = up ? "#3fb07a" : "#e8804a";
-  } else {
-    col = cfg.color;
-  }
+  const up = vals[vals.length-1] >= vals[0];
+  const col = up ? "#3fb07a" : "#e8804a";
 
   svg.innerHTML=`
     <defs><linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
@@ -1239,7 +1150,6 @@ function openAdjust(id) {
   const unit=CATEGORIES[a.cat].unit;
   const sub = isCash?`目前 ${nf(a.balance)}`:`持有 ${a.qty} ${unit} · ${nf(valueOf(a))}`;
   let dir="add";
-  const qtyIsWhole = isWholeShareCat(a.cat);
 
   const editFields = isCash
     ? `<div class="field"><div class="field-label">餘額</div>
@@ -1247,10 +1157,10 @@ function openAdjust(id) {
     : `<div class="field"><div class="field-label">代號</div>
          <input class="sm-input" id="eSym" value="${a.symbol||""}"></div>
        <div class="row2">
-         <div class="field" style="flex:1"><div class="field-label">${CATEGORIES[a.cat].qtyLabel}${qtyIsWhole?"（整股）":""}</div>
-           <input class="sm-input" id="eQty" type="number" inputmode="${qtyIsWhole?"numeric":"decimal"}" ${qtyIsWhole?"":'step="any"'} value="${a.qty}"></div>
+         <div class="field" style="flex:1"><div class="field-label">${CATEGORIES[a.cat].qtyLabel}</div>
+           <input class="sm-input" id="eQty" type="number" inputmode="decimal" value="${a.qty}"></div>
          <div class="field" style="flex:1"><div class="field-label">${CATEGORIES[a.cat].priceLabel}</div>
-           <input class="sm-input" id="ePrice" type="number" inputmode="decimal" step="any" value="${a.price}"></div>
+           <input class="sm-input" id="ePrice" type="number" inputmode="decimal" value="${a.price}"></div>
        </div>`;
 
   const sheet=showSheet(`
@@ -1270,7 +1180,7 @@ function openAdjust(id) {
         <button class="dir-btn add on" id="dAdd">＋ 增加</button>
         <button class="dir-btn sub" id="dSub">－ 減少</button>
       </div>
-      <input class="big-input" id="amt" type="number" inputmode="${(isCash||qtyIsWhole)?"numeric":"decimal"}" step="${(isCash||qtyIsWhole)?"1":"any"}"
+      <input class="big-input" id="amt" type="number" inputmode="${isCash?"numeric":"decimal"}"
         placeholder="${isCash?"輸入金額":"輸入數量（"+unit+"）"}" style="border:1.5px solid ${a.color}66">
       ${isCash?`<div class="quick-row">${[1000,5000,10000,50000].map(q=>`<button class="quick-btn" data-q="${q}">${q/1000}k</button>`).join("")}</div>`:""}
       <button class="primary-btn" id="applyBtn" disabled style="background:${a.color};color:#fff">確認</button>
@@ -1296,11 +1206,11 @@ function openAdjust(id) {
       </div>
       <div class="field">
         <div class="field-label">從「${a.name}」扣除（${isCash?"金額":unit}）</div>
-        <input class="sm-input" id="tFrom" type="number" inputmode="${(isCash||qtyIsWhole)?"numeric":"decimal"}" step="${(isCash||qtyIsWhole)?"1":"any"}" placeholder="0">
+        <input class="sm-input" id="tFrom" type="number" inputmode="${isCash?"numeric":"decimal"}" placeholder="0">
       </div>
       <div class="field" id="tToField" style="display:none">
         <div class="field-label" id="tToLabel">轉入數量</div>
-        <input class="sm-input" id="tTo" type="number" inputmode="decimal" step="any" placeholder="0">
+        <input class="sm-input" id="tTo" type="number" inputmode="decimal" placeholder="0">
       </div>
       <button class="primary-btn" id="transferBtn" disabled style="background:${a.color};color:#fff">確認轉出</button>
     </div>
@@ -1358,10 +1268,9 @@ function openAdjust(id) {
       btn.style.background = other.color+"22";
       btn.style.color = "#fff";
       const otherIsCash = other.cat==="cash";
-      const otherIsWhole = isWholeShareCat(other.cat);
       const otherUnit = otherIsCash ? "金額" : CATEGORIES[other.cat].unit;
-      tToLabel.textContent = `轉入「${other.name}」數量（${otherUnit}${otherIsWhole?"，整股":""}）`;
-      tTo.setAttribute("inputmode", (otherIsCash||otherIsWhole) ? "numeric" : "decimal");
+      tToLabel.textContent = `轉入「${other.name}」數量（${otherUnit}）`;
+      tTo.setAttribute("inputmode", otherIsCash ? "numeric" : "decimal");
       tToField.style.display = "block";
       checkTransferReady();
     };
@@ -1371,17 +1280,17 @@ function openAdjust(id) {
   function checkTransferReady(){
     transferBtn.disabled = !(transferTarget && tFrom.value && Number(tFrom.value)>0 && tTo.value && Number(tTo.value)>0);
   }
-  tFrom.oninput=()=>{ if(isCash||qtyIsWhole) tFrom.value=tFrom.value.replace(/[^\d]/g,""); checkTransferReady(); };
-  tTo.oninput=()=>{ if(transferTarget && (transferTarget.cat==="cash"||isWholeShareCat(transferTarget.cat))) tTo.value=tTo.value.replace(/[^\d]/g,""); checkTransferReady(); };
+  tFrom.oninput=()=>{ if(isCash) tFrom.value=tFrom.value.replace(/[^\d]/g,""); checkTransferReady(); };
+  tTo.oninput=()=>{ checkTransferReady(); };
 
   transferBtn.onclick=async ()=>{
     const fromAmt=Number(tFrom.value), toAmt=Number(tTo.value);
     if(!transferTarget || !fromAmt || fromAmt<=0 || !toAmt || toAmt<=0) return;
     if(isCash) a.balance=Math.max(0,a.balance-fromAmt);
-    else a.qty=Math.max(0,roundQty(+(a.qty-fromAmt).toFixed(8), a.cat));
+    else a.qty=Math.max(0,+(a.qty-fromAmt).toFixed(8));
     const tgt = transferTarget;
     if(tgt.cat==="cash") tgt.balance=(tgt.balance||0)+toAmt;
-    else tgt.qty=roundQty(+((tgt.qty||0)+toAmt).toFixed(8), tgt.cat);
+    else tgt.qty=+((tgt.qty||0)+toAmt).toFixed(8);
     transferBtn.disabled=true; transferBtn.textContent="轉出中…";
     await commitTransfer(a, tgt);
   };
@@ -1393,14 +1302,14 @@ function openAdjust(id) {
   const setDir=d=>{dir=d;dAdd.classList.toggle("on",d==="add");dSub.classList.toggle("on",d==="sub");updateLabel();};
   dAdd.onclick=()=>setDir("add"); dSub.onclick=()=>setDir("sub");
   function updateLabel(){ applyBtn.textContent=(dir==="add"?"增加":"減少")+(isCash?"":" "+unit); }
-  amt.oninput=()=>{ if(isCash||qtyIsWhole) amt.value=amt.value.replace(/[^\d]/g,""); applyBtn.disabled=!amt.value; };
+  amt.oninput=()=>{ if(isCash) amt.value=amt.value.replace(/[^\d]/g,""); applyBtn.disabled=!amt.value; };
   sheet.querySelectorAll(".quick-btn").forEach(b=>b.onclick=()=>{amt.value=b.dataset.q;applyBtn.disabled=false;});
   updateLabel();
   applyBtn.onclick=async ()=>{
     const v=Number(amt.value); if(!v||v<=0) return;
     const sign=dir==="add"?1:-1;
     if(isCash) a.balance=Math.max(0,a.balance+sign*v);
-    else a.qty=Math.max(0,roundQty(+(a.qty+sign*v).toFixed(8), a.cat));
+    else a.qty=Math.max(0,+(a.qty+sign*v).toFixed(8));
     applyBtn.disabled=true; applyBtn.textContent="儲存中…";
     await commit(a);
   };
@@ -1418,7 +1327,7 @@ function openAdjust(id) {
       const q=sheet.querySelector("#eQty").value;
       const p=sheet.querySelector("#ePrice").value;
       if(sym) a.symbol=sym;
-      if(q!=="") a.qty=Math.max(0,roundQty(Number(q), a.cat));
+      if(q!=="") a.qty=Math.max(0,Number(q));
       if(p!=="") a.price=Math.max(0,Number(p));
     }
     a.color = pendingColor;
@@ -1519,7 +1428,6 @@ function openAdd() {
     const symPh = cat==="crypto" ? "例：SOL" : cat==="stock_us" ? "例：AAPL" : "例：2330";
     const qtyPh = cat==="crypto" ? "0.05" : "100";
     const pricePh = cat==="crypto" ? "6000000" : "1000";
-    const qtyIsWhole = isWholeShareCat(cat);
     fields.innerHTML = `<div class="expand-note">
       <div class="field"><div class="field-label">名稱</div>
         <input class="sm-input" id="fName" placeholder="${namePh}"></div>
@@ -1527,8 +1435,8 @@ function openAdd() {
         ? `<div class="field"><div class="field-label">初始金額</div><input class="sm-input" id="fBal" type="number" inputmode="numeric" placeholder="0"></div>`
         : `<div class="field"><div class="field-label">代號</div><input class="sm-input" id="fSym" placeholder="${symPh}"></div>
            <div class="row2">
-             <div class="field" style="flex:1"><div class="field-label">${c.qtyLabel}${qtyIsWhole?"（整股）":""}</div><input class="sm-input" id="fQty" type="number" inputmode="${qtyIsWhole?"numeric":"decimal"}" ${qtyIsWhole?"":'step="any"'} placeholder="${qtyPh}"></div>
-             <div class="field" style="flex:1"><div class="field-label">${c.priceLabel}</div><input class="sm-input" id="fPrice" type="number" inputmode="decimal" step="any" placeholder="${pricePh}"></div>
+             <div class="field" style="flex:1"><div class="field-label">${c.qtyLabel}</div><input class="sm-input" id="fQty" type="number" inputmode="decimal" placeholder="${qtyPh}"></div>
+             <div class="field" style="flex:1"><div class="field-label">${c.priceLabel}</div><input class="sm-input" id="fPrice" type="number" inputmode="decimal" placeholder="${pricePh}"></div>
            </div>
            <div class="note-sm">＊之後接即時價 API 後價格會自動更新，你只要維護數量</div>`}
       <button class="primary-btn" id="addConfirm" disabled style="background:#5b8def;color:#fff">新增到資產</button>
@@ -1543,10 +1451,6 @@ function openAdd() {
       confirm.disabled=!ok;
     };
     fields.querySelectorAll("input").forEach(i=>i.oninput=check);
-    if (qtyIsWhole) {
-      const fQtyEl = fields.querySelector("#fQty");
-      if (fQtyEl) fQtyEl.oninput=()=>{ fQtyEl.value=fQtyEl.value.replace(/[^\d]/g,""); check(); };
-    }
     nameEl.focus();
     confirm.onclick=async ()=>{
       const id="a"+Date.now();
@@ -1560,7 +1464,7 @@ function openAdd() {
       } else {
         assets.push({id,cat,name:nameEl.value.trim(),color,order:nextOrder,
           symbol:(fields.querySelector("#fSym").value||nameEl.value).trim(),
-          qty:roundQty(Number(fields.querySelector("#fQty").value), cat),
+          qty:Number(fields.querySelector("#fQty").value),
           price:Number(fields.querySelector("#fPrice").value)});
       }
       const newA = assets[assets.length-1];
@@ -1685,13 +1589,8 @@ function openAdd() {
       }
       const fromUnit = selFrom.cat==="cash" ? "元" : CATEGORIES[selFrom.cat].unit;
       const toUnit = selTo.cat==="cash" ? "元" : CATEGORIES[selTo.cat].unit;
-      let toQty = amt/toUnitPrice;
-      if (isWholeShareCat(selTo.cat)) toQty = Math.floor(toQty); // 股票只能整股，多的錢不扣
-      const actualValue = toQty * toUnitPrice;
-      let fromQty = actualValue/fromUnitPrice;
-      if (isWholeShareCat(selFrom.cat)) fromQty = Math.floor(fromQty);
-      const wholeNote = isWholeShareCat(selTo.cat) ? "（整股，多的零頭不扣）" : "";
-      ruleEstimate.textContent = `以目前價格估算：扣約 ${fromQty.toFixed(fromUnitPrice===1?0:6)} ${fromUnit} → 買到約 ${toQty.toFixed(toUnitPrice===1?0:6)} ${toUnit}${wholeNote}（實際以執行當天即時價為準）`;
+      const fromQty = amt/fromUnitPrice, toQty = amt/toUnitPrice;
+      ruleEstimate.textContent = `以目前價格估算：扣約 ${fromQty.toFixed(fromUnitPrice===1?0:6)} ${fromUnit} → 買到約 ${toQty.toFixed(toUnitPrice===1?0:6)} ${toUnit}（實際以執行當天即時價為準）`;
     }
 
     function updateLabel() {
@@ -1949,8 +1848,6 @@ function dateStr(d) {
 function addDays(d, n) { const r=new Date(d); r.setDate(r.getDate()+n); return r; }
 
 // 執行一次定期定額的單一次扣款：固定投入金額（台幣），兩邊各自用「執行當下」的即時價換算成要扣/加多少數量。
-// 目標若是股票（台股/美股），只能買整股：先算出這筆錢最多能買到幾整股，再回推「實際花掉多少錢」，
-// 剩下湊不成一股的零頭不扣，留在來源帳戶。來源如果也是股票（少見的股票換股票），一樣不能有零股。
 // 回傳 true=成功執行、false=價格還沒抓到暫時無法換算（跳過這次，下次補執行時再試）
 function applyRecurringOccurrence(rule, from, to) {
   const fromUnitPrice = from.cat==="cash" ? 1 : from.price;
@@ -1959,15 +1856,8 @@ function applyRecurringOccurrence(rule, from, to) {
     console.warn(`定期定額 ${rule.id} 因來源或目標尚無即時價格，暫時跳過這次執行`);
     return false;
   }
-  // 先算目標那邊：股票要整股（無條件捨去），現金/幣可以有小數
-  let toDelta = rule.amount_twd / toUnitPrice;
-  if (isWholeShareCat(to.cat)) toDelta = Math.floor(toDelta);
-
-  // 用「目標實際買到的價值」反推來源要扣多少，這樣多的錢就不會被扣（留在來源帳戶）
-  const actualValue = toDelta * toUnitPrice;
-  let fromDelta = actualValue / fromUnitPrice;
-  if (isWholeShareCat(from.cat)) fromDelta = Math.floor(fromDelta);
-
+  const fromDelta = rule.amount_twd / fromUnitPrice;
+  const toDelta = rule.amount_twd / toUnitPrice;
   if (from.cat==="cash") from.balance = Math.max(0, (from.balance||0)-fromDelta);
   else from.qty = Math.max(0, +((from.qty||0)-fromDelta).toFixed(8));
   if (to.cat==="cash") to.balance = (to.balance||0)+toDelta;
@@ -2025,35 +1915,6 @@ async function runDueRecurringRules() {
   }
 }
 
-// 算出「最近一個已經過去的週五晚上9點（台灣時間）」，回傳日期字串 YYYY-MM-DD，
-// 用來判斷這週的完整資產快照該不該補記。
-function mostRecentFriday9pmDateStr(nowDate) {
-  let d = new Date(nowDate);
-  while (d.getDay() !== 5) d.setDate(d.getDate()-1); // 往前找到最近的週五
-  d.setHours(21,0,0,0);
-  if (d > nowDate) d.setDate(d.getDate()-7); // 這個週五晚上9點其實還沒到（今天正好是週五但還沒到晚上9點），往前推一週
-  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,"0"), dd=String(d.getDate()).padStart(2,"0");
-  return `${y}-${m}-${dd}`;
-}
-
-// 開 App 時補記每週完整資產快照（保險機制，主要靠 Vercel Cron 準時執行，這裡確保就算 Cron
-// 那週沒觸發成功，開 App 時還是會補上）。這是打底工程，先蒐集資料，之後要做單一資產走勢時就有得用。
-async function catchUpWeeklySnapshot() {
-  if (!cloudOn()) return;
-  try {
-    const dateStr2 = mostRecentFriday9pmDateStr(new Date());
-    const { data, error } = await sb.from("asset_snapshots").select("id").eq("snapshot_date", dateStr2).limit(1);
-    if (error) { console.warn("週快照檢查失敗:", error.message); return; }
-    if (Array.isArray(data) && data.length>0) return; // 這週已經記錄過了
-    const rows = assets.map(a => ({
-      asset_id: a.id, name: a.name, cat: a.cat,
-      value: valueOf(a), qty: a.qty ?? null, price: a.price ?? null,
-      snapshot_date: dateStr2,
-    }));
-    if (rows.length) await sb.from("asset_snapshots").insert(rows);
-  } catch(e) { console.warn("週快照補記失敗:", e.message); }
-}
-
 async function boot() {
   const status=document.getElementById("priceStatus");
   try {
@@ -2070,7 +1931,6 @@ async function boot() {
         pushHistory();
         saveNetWorthSnapshot(netWorth());
       }
-      withTimeout(catchUpWeeklySnapshot(), 10000, "週快照補記"); // 不影響開機速度，背景執行就好
     } else {
       pushHistory();
     }
@@ -2086,6 +1946,5 @@ async function boot() {
 }
 boot();
 </script>
-
 </body>
 </html>
