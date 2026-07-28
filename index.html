@@ -337,23 +337,32 @@ async function deleteAssetFromCloud(id) {
 // 存一筆淨值快照，順便記下「當下每個大分類各自的總值」，供分類走勢圖用。
 // 不用另開資料表、也不會多花寫入次數——反正快照本來就會在每次資產異動時觸發，
 // 直接把分類明細一起塞進同一筆就好。
+// 防呆：如果 Supabase 那邊還沒加 breakdown 欄位（migration 還沒跑），連 breakdown 一起存會整筆失敗，
+// 這裡失敗後會自動退回「只存總資產」，不讓新功能的欄位缺失拖累本來就在運作的核心記錄功能。
 async function saveNetWorthSnapshot(value) {
   if (!cloudOn()) return;
+  const breakdown = {};
+  GROUP_ORDER.forEach(cat => {
+    breakdown[cat] = assets.filter(a=>a.cat===cat).reduce((s,a)=>s+valueOf(a),0);
+  });
   try {
-    const breakdown = {};
-    GROUP_ORDER.forEach(cat => {
-      breakdown[cat] = assets.filter(a=>a.cat===cat).reduce((s,a)=>s+valueOf(a),0);
-    });
-    await sb.from("net_worth_history").insert({ value, breakdown });
-  } catch(e) { console.warn("歷史快照儲存失敗:", e.message); }
+    const { error } = await sb.from("net_worth_history").insert({ value, breakdown });
+    if (error) throw error;
+  } catch(e) {
+    console.warn("含分類明細的快照儲存失敗，改用只存總資產：", e.message);
+    try { await sb.from("net_worth_history").insert({ value }); }
+    catch(e2) { console.warn("歷史快照儲存失敗:", e2.message); }
+  }
 }
 
 // 讀近 24 個月的淨值歷史（供月折線圖），連分類明細一起帶回
+// 防呆：breakdown 欄位若還不存在，連 select 都會整批失敗，這裡失敗後退回只選 value，
+// 這樣至少「總資產」那條線還能正常讀到資料，不會被新欄位缺失拖累。
 async function loadNetWorthHistory() {
   if (!cloudOn()) return false;
+  const since = new Date();
+  since.setMonth(since.getMonth() - 24);
   try {
-    const since = new Date();
-    since.setMonth(since.getMonth() - 24);
     const { data, error } = await sb.from("net_worth_history")
       .select("value,breakdown,created_at")
       .gte("created_at", since.toISOString())
@@ -364,7 +373,21 @@ async function loadNetWorthHistory() {
       history = data.map(r => ({ v: Number(r.value), b: r.breakdown||null, t: new Date(r.created_at).getTime() }));
     }
     return true;
-  } catch(e) { console.warn("歷史載入失敗:", e.message); return false; }
+  } catch(e) {
+    console.warn("含分類明細的歷史載入失敗，改用只讀總資產：", e.message);
+    try {
+      const { data, error } = await sb.from("net_worth_history")
+        .select("value,created_at")
+        .gte("created_at", since.toISOString())
+        .order("created_at", { ascending: true })
+        .limit(5000);
+      if (error) throw error;
+      if (data && data.length) {
+        history = data.map(r => ({ v: Number(r.value), b: null, t: new Date(r.created_at).getTime() }));
+      }
+      return true;
+    } catch(e2) { console.warn("歷史載入失敗:", e2.message); return false; }
+  }
 }
 
 // 手動排版結構（拖曳決定的橫排/直排）存回雲端
