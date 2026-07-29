@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Asselas">
@@ -27,6 +27,8 @@
     background: #0b0c10; color: #e8eaed;
     font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", sans-serif;
     overscroll-behavior: none;
+    overflow-x: hidden; /* 防禦性保險：就算有元素意外跑出容器外，也不會讓畫布橫向被拉大 */
+    touch-action: manipulation; /* 額外防止雙擊縮放這類手勢被誤觸發，跟 viewport meta 形成雙重保護 */
   }
   body { display: flex; justify-content: center; }
   #app {
@@ -42,7 +44,11 @@
     padding: 30px 16px 18px;
   }
   .eyebrow { font-size: 11px; letter-spacing: 3px; color: #6b7280; margin-bottom: 8px; }
+  .networth-row { display: flex; align-items: center; gap: 10px; }
   .networth { font-size: 40px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
+  .eye-btn { background: none; border: none; color: #5b616e; padding: 4px; cursor: pointer; display: flex; align-items: center; margin-top: 6px; }
+  .eye-btn:active { transform: scale(.92); }
+  .eye-btn.off { color: #3a3f4a; }
   .subline { font-size: 12px; color: #5b616e; margin-top: 4px; }
   .price-status-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
   .price-status { font-size: 11px; color: #5b616e; }
@@ -62,13 +68,15 @@
   #treemap-inner { position: relative; width: 100%; height: 100%; }
   .tile {
     position: absolute; padding: 3.5px; cursor: pointer;
-    touch-action: pan-y; /* 平常讓瀏覽器原生處理垂直捲動（順、不會跟自己寫的邏輯打架），
-                             只有真正判定成拖曳時才用 e.preventDefault() 介入接管，見 globalPointerMove */
+    /* touch-action 一定要一開始就是 none，不能「先 pan-y、長按後才切成 none」——
+       瀏覽器是在手指剛觸碰的那一刻就決定好怎麼處理這個手勢，事後用 class 切換不會生效，
+       瀏覽器依然會照最初的判斷繼續把移動當成頁面捲動處理，這正是「拖曳時方塊被頁面捲動搶走」的成因。
+       改成從頭到尾都是 none，完全不讓瀏覽器插手，捲動改成我們自己在 globalPointerMove 手動模擬。 */
+    touch-action: none;
     transition: left .55s cubic-bezier(.34,1.15,.4,1), top .55s cubic-bezier(.34,1.15,.4,1),
                 width .55s cubic-bezier(.34,1.15,.4,1), height .55s cubic-bezier(.34,1.15,.4,1);
   }
   .tile.dragging {
-    touch-action: none;
     cursor: grabbing;
   }
   .tile.dragging .tile-inner {
@@ -133,7 +141,12 @@
   .chart-series-btn .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .chart-series-btn.on { border-color: currentColor; }
   .chart-range { font-size: 11px; color: #5b616e; }
-  #sparkline { width: 100%; height: 168px; display: block; }
+  #sparkline { width: 100%; height: 168px; display: block; touch-action: none; }
+  .chart-tooltip {
+    position: absolute; top: 4px; pointer-events: none;
+    background: #1c1e26f0; border: 1px solid #2a2d38; border-radius: 10px;
+    padding: 7px 10px; min-width: 110px; box-shadow: 0 6px 18px rgba(0,0,0,.35);
+  }
 
   /* 底部彈出面板 */
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex;
@@ -183,7 +196,14 @@
   <div class="topbar">
     <div>
       <div class="eyebrow">淨資產 TWD</div>
-      <div class="networth" id="networth">0</div>
+      <div class="networth-row">
+        <div class="networth" id="networth">0</div>
+        <button class="eye-btn" id="eyeBtn" title="隱藏／顯示金額">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="eyeIcon">
+            <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      </div>
       <div class="subline" id="subline"></div>
       <div class="price-status-row">
         <span class="price-status" id="priceStatus">—</span>
@@ -195,8 +215,23 @@
     <button class="addbtn" id="addBtn">+</button>
   </div>
 
+  <!-- 上區：資產方塊 -->
   <div id="treemap"><div id="treemap-inner"></div></div>
 
+  <!-- 中區：資產變化圖表 -->
+  <div class="chart-card">
+    <div class="chart-head">
+      <span class="chart-title">資產變化</span>
+      <span class="chart-range" id="chartRange">近期</span>
+    </div>
+    <div class="chart-series-row" id="chartSeriesRow"></div>
+    <div style="position:relative">
+      <svg id="sparkline" viewBox="0 0 340 168" preserveAspectRatio="none"></svg>
+      <div class="chart-tooltip" id="chartTooltip" style="display:none"></div>
+    </div>
+  </div>
+
+  <!-- 下區：詳細資產數字 -->
   <div class="wrap">
     <div class="section-label" style="display:flex;align-items:center;justify-content:space-between">
       <span>組成</span>
@@ -206,15 +241,6 @@
       </button>
     </div>
     <div id="legend"></div>
-  </div>
-
-  <div class="chart-card">
-    <div class="chart-head">
-      <span class="chart-title">資產變化</span>
-      <span class="chart-range" id="chartRange">近期</span>
-    </div>
-    <div class="chart-series-row" id="chartSeriesRow"></div>
-    <svg id="sparkline" viewBox="0 0 340 168" preserveAspectRatio="none"></svg>
   </div>
 </div>
 
@@ -388,6 +414,31 @@ async function loadNetWorthHistory() {
       return true;
     } catch(e2) { console.warn("歷史載入失敗:", e2.message); return false; }
   }
+}
+
+// 讀近 24 個月「每個資產」自己的每週快照（asset_snapshots 表），供「點進某分類後看子項目走勢」用。
+// 用 asset_id 分組，整理成 { assetId: [{t,v}, ...] } 方便丟進 buildMonthlySeries。
+let assetSnapshotHistory = {};
+async function loadAssetSnapshots() {
+  if (!cloudOn()) return false;
+  try {
+    const since = new Date();
+    since.setMonth(since.getMonth() - 24);
+    const sinceStr = since.toISOString().slice(0,10);
+    const { data, error } = await sb.from("asset_snapshots")
+      .select("asset_id,value,snapshot_date")
+      .gte("snapshot_date", sinceStr)
+      .order("snapshot_date", { ascending: true })
+      .limit(20000);
+    if (error) throw error;
+    const grouped = {};
+    (data||[]).forEach(r => {
+      if (!grouped[r.asset_id]) grouped[r.asset_id] = [];
+      grouped[r.asset_id].push({ t: new Date(r.snapshot_date+"T12:00:00").getTime(), v: Number(r.value) });
+    });
+    assetSnapshotHistory = grouped;
+    return true;
+  } catch(e) { console.warn("每週資產快照載入失敗:", e.message); return false; }
 }
 
 // 手動排版結構（拖曳決定的橫排/直排）存回雲端
@@ -845,6 +896,44 @@ const MOVE_CANCEL_PX = 10; // 長按計時器觸發前，手指移動超過這�
 // 不管有沒有確實觸發收尾，都不會有「監聽器疊加」的問題。
 let dragState = null; // null = 目前沒有任何方塊在被按住/拖曳
 
+// 拖曳位置更新節流：DOM 寫入節流到「每個動畫影格最多一次」（用 requestAnimationFrame），
+// 不要每次 pointermove 事件一觸發就馬上寫 DOM——這是主流拖曳套件（dnd-kit、Framer Motion 等）
+// 常見的做法，觸控取樣頻率常常比螢幕更新頻率高，直接每次事件都寫 DOM 反而容易卡頓。
+let dragRAF = null;
+function scheduleDragUpdate() {
+  if (dragRAF != null) return;
+  dragRAF = requestAnimationFrame(() => { dragRAF = null; applyDragPosition(); });
+}
+
+// 邊緣自動捲動：拖曳中手指靠近螢幕上/下邊緣時，頁面會自動朝那個方向微幅捲動，
+// 這樣才能把方塊拖到目前看不到、需要捲動才能看到的位置——這是 Trello、Notion 等
+// 主流拖放介面的標準做法，之前完全沒做，才會「拿起方塊後在可視範圍內卡住」。
+const EDGE_ZONE = 72;        // 距離螢幕上/下邊緣多少像素以內，開始自動捲動
+const MAX_SCROLL_SPEED = 15; // 最靠近邊緣時，每個影格捲動的最大像素數（離邊緣越近，捲越快）
+let autoScrollRAF = null;
+
+function autoScrollLoop() {
+  if (!dragState || !dragState.dragActive) { autoScrollRAF = null; return; }
+  const y = dragState.lastPointerClientY;
+  const vh = window.innerHeight;
+  let dy = 0;
+  if (y < EDGE_ZONE) dy = -MAX_SCROLL_SPEED * (1 - Math.max(0,y)/EDGE_ZONE);
+  else if (y > vh - EDGE_ZONE) dy = MAX_SCROLL_SPEED * (1 - Math.max(0, vh-y)/EDGE_ZONE);
+  if (dy !== 0) {
+    window.scrollBy(0, dy);
+    applyDragPosition(); // 頁面捲動了，就算手指沒動，方塊位置也要立刻跟著同步，不能只靠 pointermove 觸發
+    autoScrollRAF = requestAnimationFrame(autoScrollLoop);
+  } else {
+    autoScrollRAF = null; // 手指已經離開邊緣區，停止自動捲動迴圈
+  }
+}
+function maybeStartAutoScroll() {
+  if (autoScrollRAF != null || !dragState) return;
+  const y = dragState.lastPointerClientY;
+  const vh = window.innerHeight;
+  if (y < EDGE_ZONE || y > vh - EDGE_ZONE) autoScrollRAF = requestAnimationFrame(autoScrollLoop);
+}
+
 function resetDragState() {
   if (dragState) {
     clearTimeout(dragState.timer);
@@ -852,6 +941,8 @@ function resetDragState() {
     dragState.el.style.zIndex = "";
     dragState.el.style.transition = "";
   }
+  if (autoScrollRAF != null) { cancelAnimationFrame(autoScrollRAF); autoScrollRAF = null; }
+  if (dragRAF != null) { cancelAnimationFrame(dragRAF); dragRAF = null; }
   draggingId = null;
   dragState = null;
 }
@@ -877,31 +968,31 @@ function applyIntent(cat, assetId, intent) {
   }
 }
 
-function globalPointerMove(e) {
-  if (!dragState) return;
+// 真正套用拖曳中方塊的新位置＋判斷疊在哪個目標上。抽成獨立函式，讓 pointermove 事件
+// 跟自動捲動迴圈都能呼叫（兩者都可能需要「重新算一次位置」：手指移動、或頁面自動捲動）。
+function applyDragPosition() {
+  if (!dragState || !dragState.dragActive) return;
   const { el, assetRef } = dragState;
   const a = assets.find(x=>x.id===assetRef.id);
   if (!a) { resetDragState(); return; }
 
-  if (!dragState.dragActive) {
-    // 這個階段完全不呼叫 preventDefault、不手動操作 scroll——.tile 已設 touch-action:pan-y，
-    // 讓瀏覽器原生處理垂直捲動（順、不會跟自己寫的邏輯打架，之前手動 window.scrollBy() 那版
-    // 會跟瀏覽器原生捲動機制互搶，變成「推一下、彈回來」的抖動）。
-    // 這裡只是持續監看移動量：一旦超過無反應區門檻，代表使用者是要滑動頁面、不是要長按，
-    // 取消長按計時器即可，捲動本身完全不用我們插手。
-    if (!dragState.scrolling) {
-      const dx0 = e.clientX-dragState.startX, dy0=e.clientY-dragState.startY;
-      if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) {
-        clearTimeout(dragState.timer); dragState.timer=null;
-        dragState.scrolling = true;
-      }
-    }
-    return;
+  // dx/dy 是「文件座標系」下的位移量：手指在螢幕上的位移 + 這段期間頁面額外捲動的量。
+  // 一定要把捲動量加進去——方塊的 left/top 是相對「文件」而不是相對「螢幕」，
+  // 如果拖曳中頁面又自動捲動了卻沒把這段位移算進來，方塊會跟手指對不齊、亂飄。
+  const dx = dragState.lastPointerClientX - dragState.startX;
+  const dy = (dragState.lastPointerClientY - dragState.startY) + (window.scrollY - dragState.scrollYAtStart);
+  let newLeft = dragState.startLeft + dx, newTop = dragState.startTop + dy;
+
+  // 限制拖曳範圍：不能整個方塊都跑到容器外面（避免畫布被撐大），
+  // 但中心點要能真正抵達邊界——所以允許方塊懸出邊界最多「半個身位」，
+  // 不是把整塊都夾在容器內（那樣中心永遠到不了邊緣，是之前的錯誤做法）
+  const container = document.getElementById("treemap-inner");
+  if (container) {
+    const halfW = dragState.hitW/2, halfH = dragState.hitH/2;
+    newLeft = Math.min(Math.max(newLeft, -halfW), container.clientWidth - halfW);
+    newTop = Math.min(Math.max(newTop, -halfH), container.clientHeight - halfH);
   }
 
-  e.preventDefault();
-  const dx = e.clientX-dragState.startX, dy = e.clientY-dragState.startY;
-  const newLeft = dragState.startLeft+dx, newTop = dragState.startTop+dy;
   el.style.left = newLeft+"px";
   el.style.top = newTop+"px";
 
@@ -931,6 +1022,38 @@ function globalPointerMove(e) {
   applyIntent(layoutKey(a), a.id, intent);
   dragState.layoutTouched = true;
   renderTreemap(); // 其他方塊依新結構平滑重新排列、讓位；拖曳中的方塊也會跟著變形（見 dragging 的 transition 設定）
+}
+
+function globalPointerMove(e) {
+  if (!dragState) return;
+  dragState.lastPointerClientX = e.clientX;
+  dragState.lastPointerClientY = e.clientY;
+
+  if (!dragState.dragActive) {
+    // .tile 現在一律是 touch-action:none（瀏覽器完全不會插手任何捲動），
+    // 所以「長按判定前、看起來像滑頁面」的這段，捲動要靠我們自己模擬。
+    // 先在無反應區內完全不做任何事（不捲動、不取消長按計時），
+    // 避免手拿著手機的自然手震被誤判成「要捲動」而讓畫面抖動；
+    // 超過門檻後才確定是滑動意圖，開始手動跟手捲動。
+    const dx0 = e.clientX-dragState.startX, dy0=e.clientY-dragState.startY;
+    if (!dragState.scrolling) {
+      if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) {
+        clearTimeout(dragState.timer); dragState.timer=null;
+        dragState.scrolling = true;
+        dragState.lastScrollY = e.clientY; // 從超過門檻的這一刻開始才手動捲動，之後跟手捲動
+      }
+      return;
+    }
+    e.preventDefault();
+    const dyFrame = e.clientY - dragState.lastScrollY;
+    dragState.lastScrollY = e.clientY;
+    window.scrollBy(0, -dyFrame);
+    return;
+  }
+
+  e.preventDefault();
+  scheduleDragUpdate();   // DOM 寫入節流到下一個動畫影格
+  maybeStartAutoScroll(); // 手指若已經在邊緣區，啟動自動捲動迴圈
 }
 
 function globalPointerUp() {
@@ -979,8 +1102,10 @@ function attachTileInteraction(el, assetRef) {
     dragState = {
       el, assetRef,
       startX: e.clientX, startY: e.clientY,
+      lastPointerClientX: e.clientX, lastPointerClientY: e.clientY,
       startLeft: parseFloat(el.style.left)||0,
       startTop: parseFloat(el.style.top)||0,
+      scrollYAtStart: window.scrollY, // 記下拖曳開始當時的捲動位置，供後續計算「這段期間頁面額外捲動了多少」
       dragActive: false,
       scrolling: false, // 是否已確認這次手勢是「滑動頁面」（純粹用來標記不是點擊，捲動本身交給瀏覽器原生處理）
       hitW: 0, hitH: 0, // 判定用的固定尺寸（拿起來那一刻凍結）
@@ -1006,9 +1131,13 @@ function attachTileInteraction(el, assetRef) {
 }
 
 // ── 淨資產數字動畫 ──
+let netWorthHidden = false;
+try { netWorthHidden = localStorage.getItem("assel_nwHidden") === "1"; } catch(e) {}
+
 function animateNetWorth(to) {
-  const from = animatedNW, dur=550, t0=performance.now();
   const el=document.getElementById("networth");
+  if (netWorthHidden) { el.textContent = "•••••••"; animatedNW = to; return; }
+  const from = animatedNW, dur=550, t0=performance.now();
   function tick(t){
     const p=Math.min((t-t0)/dur,1);
     const e=1-Math.pow(1-p,3);
@@ -1048,34 +1177,39 @@ function renderLegend() {
 
 // ── 折線圖：近 24 個月，月度聚合 + 平滑曲線，可切換看總資產或個別大分類 ──
 let chartSeries = "total"; // "total" | "cash" | "crypto" | "stock_tw" | "stock_us"
+let lastChartLayout = null; // 記住上次渲染的座標換算方式，供手勢滑動查值用
+let chartScrubbing = false;
 
 // 把逐筆變動紀錄聚合成「近 24 個月，每月一個點」
 // 規則：每月取「當月最後一筆」的值；該月沒有變動就沿用前一個有資料的月份（forward-fill）
 //      24 個月內完全沒有任何歷史資料的月份，往前抓不到值時，用「當前值」墊底
 // histExtractor：從一筆歷史快照裡取出「這個系列」的值（沒有資料回傳 null，代表這個點跳過不用）
 // liveValueFn：算出「現在當下」這個系列的即時值，蓋掉最後一個月（本月），讓線的終點永遠反映最新狀態
-function buildMonthlySeries(histExtractor, liveValueFn) {
+// sourceHistory：資料來源陣列（可以是全域淨值歷史 history，也可以是單一資產的每週快照）
+function buildMonthlySeries(sourceHistory, histExtractor, liveValueFn) {
   const now = new Date();
   const months = [];
   for (let i = 23; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     months.push({ y: d.getFullYear(), m: d.getMonth(), label: `${d.getFullYear()}/${d.getMonth()+1}` });
   }
-  const sorted = history
+  const sorted = sourceHistory
     .map(h => ({ t: h.t, v: histExtractor(h) }))
     .filter(h => h.v != null)
     .sort((a,b) => a.t - b.t);
   let idx = 0;
-  let lastVal = sorted.length ? sorted[0].v : liveValueFn();
+  // 一開始是 null，代表「這個月完全沒有紀錄」——不像以前會被誤填成第一筆資料的值、往回一路貼到最早的月份。
+  // 只有真的碰到第一筆資料之後，才開始 forward-fill（沿用前一筆直到下一次變動）。
+  let lastVal = null;
   const series = months.map(mo => {
     const monthEndTime = new Date(mo.y, mo.m + 1, 1).getTime() - 1;
     while (idx < sorted.length && sorted[idx].t <= monthEndTime) {
       lastVal = sorted[idx].v;
       idx++;
     }
-    return { ...mo, v: lastVal };
+    return { ...mo, v: lastVal }; // v 可能是 null，畫圖時這幾個月不會畫線
   });
-  if (series.length) series[series.length-1].v = liveValueFn();
+  if (series.length) series[series.length-1].v = liveValueFn(); // 最後一個月永遠用即時值，不會是 null
   return series;
 }
 
@@ -1144,32 +1278,47 @@ function renderChart() {
   });
 
   if (history.length===0) {
+    lastChartLayout = null;
     svg.setAttribute("viewBox","0 0 340 120");
     svg.innerHTML=`<text x="170" y="60" fill="#4b515c" font-size="12" text-anchor="middle">調整資產後這裡會顯示走勢</text>`;
     document.getElementById("chartRange").textContent="—";
     return;
   }
 
-  // 選「總資產」時，把總資產跟四個大分類的線一起疊在同一張圖上比較；
-  // 選個別分類時，只畫那一條
+  // 選「總資產」：總資產(主線) + 四個大分類(淡線) 疊在同一張圖
+  // 選個別分類（例如台股）：那個分類(主線) + 分類底下每個資產各自的走勢(淡線，用資產自己的顏色)
   const showAll = chartSeries === "total";
-  const seriesToShow = showAll ? ["total", ...GROUP_ORDER] : [chartSeries];
+  let lines = []; // 統一格式：{ key, label, color, series, isMain }
+  if (showAll) {
+    lines.push({ key:"total", label:"總資產", color:TOTAL_COLOR,
+      series: buildMonthlySeries(history, h=>h.v, ()=>netWorth()), isMain:true });
+    GROUP_ORDER.forEach(cat=>{
+      const cfg = getChartSeriesConfig(cat);
+      lines.push({ key:cat, label:cfg.label, color:cfg.color,
+        series: buildMonthlySeries(history, cfg.histExtractor, cfg.liveValueFn), isMain:false });
+    });
+  } else {
+    const cat = chartSeries;
+    const cfg = getChartSeriesConfig(cat);
+    lines.push({ key:cat, label:cfg.label, color:cfg.color,
+      series: buildMonthlySeries(history, cfg.histExtractor, cfg.liveValueFn), isMain:true });
+    // 子項目：這個分類底下「目前」每一個資產，各自的走勢（資料來源是每週快照 asset_snapshots）
+    assets.filter(a=>a.cat===cat).forEach(a=>{
+      const assetHist = assetSnapshotHistory[a.id] || [];
+      lines.push({ key:"asset:"+a.id, label:a.name, color:a.color,
+        series: buildMonthlySeries(assetHist, h=>h.v, ()=>valueOf(a)), isMain:false });
+    });
+  }
 
-  const allSeries = {};
-  seriesToShow.forEach(key => {
-    const cfg = getChartSeriesConfig(key);
-    allSeries[key] = buildMonthlySeries(cfg.histExtractor, cfg.liveValueFn);
-  });
-  const n = allSeries[seriesToShow[0]].length;
-
+  const n = lines[0].series.length;
   const W=340, H=168;
   const padL=42, padR=10, padT=14, padB=22;
   const plotW=W-padL-padR, plotH=H-padT-padB;
 
   // Y 軸固定從 0 開始（不是用這條線自己的 min~max），這樣「完全沒有變化的平線」也會停在
-  // 該有的高度，不會因為 max===min 被誤判成貼底——這是之前「分類線都貼在0」的成因
+  // 該有的高度，不會因為 max===min 被誤判成貼底。只看有資料(非null)的月份算最大值。
   let maxVal = 0;
-  seriesToShow.forEach(key => { allSeries[key].forEach(pt => { if (pt.v > maxVal) maxVal = pt.v; }); });
+  lines.forEach(ln => { ln.series.forEach(pt => { if (pt.v!=null && pt.v > maxVal) maxVal = pt.v; }); });
   if (maxVal <= 0) maxVal = 1;
   const yMax = maxVal * 1.12; // 留一點頭部空間，最高點不會頂到圖表邊緣
 
@@ -1185,44 +1334,99 @@ function renderChart() {
   });
   // 畫 X 軸月份標籤（每隔幾個月標一次，避免 24 個全部擠在一起看不清楚）
   const labelStep = Math.ceil(n/6);
-  const labelSeries = allSeries[seriesToShow[0]];
+  const labelSeries = lines[0].series;
   for (let i=0;i<n;i+=labelStep) {
     axisSvg += `<text x="${xAt(i).toFixed(1)}" y="${H-6}" fill="#5b616e" font-size="9" text-anchor="middle">${labelSeries[i].label}</text>`;
   }
 
-  // 畫每一條線
+  // 畫每一條線：沒有資料(null)的月份直接跳過不連線，只從「第一筆真的有資料」的月份開始畫，
+  // 不會像以前那樣把最早的月份誤畫成一條假的平線。
+  // 主線(isMain)：完整不透明、有底色漸層、線比較粗；子項目(分類線 or 個別資產線)：透明度降到 50%、細一點、不加底色。
   let linesSvg = "";
-  const single = seriesToShow.length===1;
-  seriesToShow.forEach(key=>{
-    const s = allSeries[key];
-    const pts = s.map((pt,i)=>[xAt(i), yAt(pt.v)]);
-    const line = smoothPath(pts);
-    const vals = s.map(pt=>pt.v);
-    let col;
-    if (key==="total") col = TOTAL_COLOR;
-    else col = getChartSeriesConfig(key).color;
-    // 單獨檢視某分類時保留原本的漲跌配色給總資產專用邏輯（只有總資產單獨顯示時才用漲綠跌橘）
-    if (single && key==="total") {
-      const up = vals[vals.length-1] >= vals[0];
-      col = up ? "#3fb07a" : "#e8804a";
-    }
-    const last = pts[pts.length-1];
-    if (single) {
-      const area = line + ` L${last[0].toFixed(1)} ${(H-padB).toFixed(1)} L${pts[0][0].toFixed(1)} ${(H-padB).toFixed(1)} Z`;
-      linesSvg += `<defs><linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
+  lines.forEach(ln=>{
+    const s = ln.series;
+    const firstIdx = s.findIndex(pt => pt.v != null);
+    if (firstIdx === -1) return; // 完全沒有任何資料，這條線整個跳過不畫
+    const validPts = [];
+    for (let i=firstIdx; i<n; i++) { if (s[i].v!=null) validPts.push([xAt(i), yAt(s[i].v)]); }
+    if (validPts.length < 2) return; // 只有一個點畫不出線，跳過（會在手勢查值時仍看得到這個點）
+    const line = smoothPath(validPts);
+    const col = ln.color;
+    const last = validPts[validPts.length-1];
+    const opacity = ln.isMain ? 1 : 0.5;
+    if (ln.isMain) {
+      const area = line + ` L${last[0].toFixed(1)} ${(H-padB).toFixed(1)} L${validPts[0][0].toFixed(1)} ${(H-padB).toFixed(1)} Z`;
+      linesSvg += `<defs><linearGradient id="grad-${ln.key.replace(/[^a-zA-Z0-9]/g,'')}" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="${col}" stop-opacity="0.28"/>
         <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
       </linearGradient></defs>
-      <path d="${area}" fill="url(#grad)"/>`;
+      <path d="${area}" fill="url(#grad-${ln.key.replace(/[^a-zA-Z0-9]/g,'')})"/>`;
     }
-    const strokeW = key==="total" ? 3 : 2;
-    linesSvg += `<path d="${line}" fill="none" stroke="${col}" stroke-width="${strokeW}" stroke-linecap="round" stroke-linejoin="round"/>`;
-    linesSvg += `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="${key==='total'?4:3}" fill="${col}"/>`;
+    const strokeW = ln.isMain ? 3 : 1.75;
+    linesSvg += `<path d="${line}" fill="none" stroke="${col}" stroke-width="${strokeW}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="${opacity}"/>`;
+    linesSvg += `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="${ln.isMain?4:2.5}" fill="${col}" fill-opacity="${opacity}"/>`;
   });
 
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.innerHTML = axisSvg + linesSvg;
+  svg.innerHTML = axisSvg + linesSvg + `<g id="scrubLayer"></g>`;
   document.getElementById("chartRange").textContent = `${labelSeries[0].label} – ${labelSeries[n-1].label}`;
+
+  // 記住這次渲染的座標換算方式，供手勢滑動查值使用（見 updateChartScrub）
+  lastChartLayout = { W, H, padL, padR, padT, padB, n, xAt, yAt, lines, labelSeries };
+}
+
+// ── 圖表手勢查值：手指在圖上滑動，顯示十字線 + 該時間點的實際數字（參考股票 K 線圖的價格查看手勢）──
+function hideChartScrub() {
+  const g = document.getElementById("scrubLayer");
+  if (g) g.innerHTML = "";
+  const tip = document.getElementById("chartTooltip");
+  if (tip) tip.style.display = "none";
+}
+
+function updateChartScrub(clientX) {
+  if (!lastChartLayout) return;
+  const svgEl = document.getElementById("sparkline");
+  const rect = svgEl.getBoundingClientRect();
+  if (!rect.width) return;
+  const { W, H, padL, padR, padT, padB, n, xAt, yAt, lines, labelSeries } = lastChartLayout;
+
+  // 手指的螢幕座標換算成 SVG 內部座標系（viewBox 跟實際渲染像素大小不一定一樣）
+  const relX = (clientX - rect.left) / rect.width * W;
+  const plotW = W - padL - padR;
+  let idx = Math.round(((relX - padL) / plotW) * (n - 1));
+  idx = Math.max(0, Math.min(n - 1, idx));
+  const x = xAt(idx);
+
+  const g = document.getElementById("scrubLayer");
+  if (!g) return;
+  let content = `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${H-padB}" stroke="#8a94a6" stroke-width="1" stroke-dasharray="3,3" stroke-opacity="0.5"/>`;
+  lines.forEach(ln=>{
+    const pt = ln.series[idx];
+    if (pt.v == null) return; // 這個月這條線沒有資料，不畫點
+    const y = yAt(pt.v);
+    content += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.5" fill="${ln.color}" stroke="#0e0f13" stroke-width="1.5"/>`;
+  });
+  g.innerHTML = content;
+
+  // 文字用 HTML 顯示（比 SVG text 好排版、好讀）
+  const tip = document.getElementById("chartTooltip");
+  if (tip) {
+    const rows = lines.map(ln=>{
+      const pt = ln.series[idx];
+      if (pt.v == null) return "";
+      return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0">
+        <span style="width:7px;height:7px;border-radius:50%;background:${ln.color};flex-shrink:0"></span>
+        <span style="color:#8a94a6;font-size:11px">${ln.label}</span>
+        <span style="margin-left:auto;color:#e8eaed;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums">${nf(pt.v)}</span>
+      </div>`;
+    }).join("");
+    tip.innerHTML = `<div style="font-size:10px;color:#5b616e;margin-bottom:3px">${labelSeries[idx].label}</div>${rows}`;
+    tip.style.display = "block";
+    // 讓 tooltip 跟著手指左右移動，但不超出圖表卡片邊界
+    const tipW = 130;
+    let leftPct = (x/W)*100;
+    tip.style.left = `clamp(4px, calc(${leftPct}% - ${tipW/2}px), calc(100% - ${tipW+4}px))`;
+  }
 }
 
 function pushHistory() {
@@ -1262,7 +1466,8 @@ async function commitTransfer(fromAsset, toAsset) {
 function renderAll(animate=true) {
   renderTreemap(); renderLegend(); renderChart();
   const nw=netWorth();
-  if(animate) animateNetWorth(nw); else { document.getElementById("networth").textContent=nf(nw); animatedNW=nw; }
+  if(animate) animateNetWorth(nw);
+  else { document.getElementById("networth").textContent = netWorthHidden ? "•••••••" : nf(nw); animatedNW=nw; }
   document.getElementById("subline").textContent = `${assets.length} 項資產`;
 }
 
@@ -1781,7 +1986,37 @@ function openAdd() {
 }
 
 document.getElementById("addBtn").onclick=openAdd;
+
+const eyeBtn = document.getElementById("eyeBtn");
+const eyeIcon = document.getElementById("eyeIcon");
+function updateEyeIcon() {
+  eyeBtn.classList.toggle("off", netWorthHidden);
+  eyeIcon.innerHTML = netWorthHidden
+    ? `<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><line x1="2" y1="2" x2="22" y2="22"/>`
+    : `<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>`;
+}
+updateEyeIcon();
+eyeBtn.onclick = () => {
+  netWorthHidden = !netWorthHidden;
+  try { localStorage.setItem("assel_nwHidden", netWorthHidden ? "1" : "0"); } catch(e) {}
+  updateEyeIcon();
+  document.getElementById("networth").textContent = netWorthHidden ? "•••••••" : nf(animatedNW);
+};
 document.getElementById("refreshBtn").onclick=()=>refreshPrices(false);
+
+// 圖表手勢查值：長按/拖曳圖表任一處，跟手顯示十字線與該時間點的數字；放開手指恢復正常顯示
+(() => {
+  const svgEl = document.getElementById("sparkline");
+  if (!svgEl) return;
+  svgEl.addEventListener("pointerdown", (e) => {
+    chartScrubbing = true;
+    try { svgEl.setPointerCapture(e.pointerId); } catch(err) {}
+    updateChartScrub(e.clientX);
+  });
+  svgEl.addEventListener("pointermove", (e) => { if (chartScrubbing) updateChartScrub(e.clientX); });
+  svgEl.addEventListener("pointerup", () => { chartScrubbing = false; hideChartScrub(); });
+  svgEl.addEventListener("pointercancel", () => { chartScrubbing = false; hideChartScrub(); });
+})();
 
 const freeModeBtn = document.getElementById("freeModeBtn");
 function updateFreeModeBtn() { freeModeBtn.classList.toggle("on", freeMode); }
@@ -2110,6 +2345,7 @@ async function boot() {
       await withTimeout(loadRecurringRules(), 15000, "定期定額載入");
       await withTimeout(runDueRecurringRules(), 15000, "定期定額補執行");
       const gotHistory = await withTimeout(loadNetWorthHistory(), 15000, "歷史載入");
+      await withTimeout(loadAssetSnapshots(), 15000, "每週資產快照載入");
       // 雲端還沒有任何歷史點（例如第一次啟用同步）：補記目前這筆，讓折線圖有起點
       if (!gotHistory || history.length===0) {
         pushHistory();
