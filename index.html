@@ -514,6 +514,9 @@ async function claimRecurringRule(rule, dateString) {
 }
 
 const nf = n => Math.round(n).toLocaleString();
+// 淨資產隱藏開關打開時，畫面上所有台幣金額都改顯示這個，取代 nf()；
+// 百分比、持有數量(顆/股)不算「金額」，維持照常顯示。
+const mnf = n => netWorthHidden ? "•••••" : nf(n);
 
 // 台股、美股的持股單位是「整股」，不會有小數股；加密貨幣則本來就可以有小數。
 // 統一在這裡處理，任何會改到 qty 的地方都要經過這個函式，確保不會出現 8.3 股這種不存在的持股狀態。
@@ -722,7 +725,7 @@ function renderTreemap() {
     // 3. 兩種都放不下，才降級到依面積分級、砍資訊顯示
     const nameStr = a.isOther ? "其他" : a.name;
     const pctStr = pct.toFixed(1) + "%";
-    const valStr = nf(n.value);
+    const valStr = mnf(n.value);
 
     // 直向模式的字級（跟下面 L3 實際渲染用的字級要一致，量測才準）
     const nameSizeCol = a.isOther ? 13 : 16;
@@ -872,7 +875,7 @@ function renderTreemap() {
 
       // 金額：L2 顯示，更小就砍
       valEl.style.display = level>=2 ? "block" : "none";
-      valEl.textContent = nf(n.value);
+      valEl.textContent = mnf(n.value);
       valEl.style.fontSize = "10px";
       valEl.style.lineHeight = "1.2";
       valEl.style.color = a.isOther?"#8a94a6":"rgba(255,255,255,.85)";
@@ -1161,7 +1164,7 @@ function renderLegend() {
         <button class="theme-dot" data-cat="${cat}" title="更換 ${CATEGORIES[cat].label} 主題色" style="background:${getPalette(cat)[0]}"></button>
         <span class="g-name">${CATEGORIES[cat].label}</span>
       </span>
-      <span class="g-val">${nf(gv)}</span>
+      <span class="g-val">${mnf(gv)}</span>
     </div>`;
     g.querySelector(".theme-dot").addEventListener("click", ()=>openThemePicker(cat));
     const items=document.createElement("div"); items.className="legend-items";
@@ -1186,30 +1189,42 @@ let chartScrubbing = false;
 // histExtractor：從一筆歷史快照裡取出「這個系列」的值（沒有資料回傳 null，代表這個點跳過不用）
 // liveValueFn：算出「現在當下」這個系列的即時值，蓋掉最後一個月（本月），讓線的終點永遠反映最新狀態
 // sourceHistory：資料來源陣列（可以是全域淨值歷史 history，也可以是單一資產的每週快照）
-function buildMonthlySeries(sourceHistory, histExtractor, liveValueFn) {
+// 圖表要顯示幾週：資料還不多，先顯示 26 週，之後累積夠了可以改成 52（一年）或 104（兩年）
+const CHART_WEEKS = 26;
+
+// sourceHistory：資料來源陣列（可以是全域淨值歷史 history，也可以是單一資產的每週快照）
+function buildWeeklySeries(sourceHistory, histExtractor, liveValueFn) {
   const now = new Date();
-  const months = [];
-  for (let i = 23; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    months.push({ y: d.getFullYear(), m: d.getMonth(), label: `${d.getFullYear()}/${d.getMonth()+1}` });
+  // 找出「本週」的週一當基準（週日算前一週的最後一天），每週一格往前推 CHART_WEEKS 週
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dow = today.getDay(); // 0=Sun...6=Sat
+  const daysSinceMonday = (dow === 0) ? 6 : dow - 1;
+  const thisMonday = new Date(today); thisMonday.setDate(today.getDate() - daysSinceMonday);
+
+  const weeks = [];
+  for (let i = CHART_WEEKS - 1; i >= 0; i--) {
+    const weekStart = new Date(thisMonday); weekStart.setDate(thisMonday.getDate() - i*7);
+    weeks.push({ start: weekStart, label: `${weekStart.getMonth()+1}/${weekStart.getDate()}` });
   }
+
   const sorted = sourceHistory
     .map(h => ({ t: h.t, v: histExtractor(h) }))
     .filter(h => h.v != null)
     .sort((a,b) => a.t - b.t);
   let idx = 0;
-  // 一開始是 null，代表「這個月完全沒有紀錄」——不像以前會被誤填成第一筆資料的值、往回一路貼到最早的月份。
+  // 一開始是 null，代表「這一週完全沒有紀錄」——不會被誤填成第一筆資料的值、往回一路貼到最早的週。
   // 只有真的碰到第一筆資料之後，才開始 forward-fill（沿用前一筆直到下一次變動）。
   let lastVal = null;
-  const series = months.map(mo => {
-    const monthEndTime = new Date(mo.y, mo.m + 1, 1).getTime() - 1;
-    while (idx < sorted.length && sorted[idx].t <= monthEndTime) {
+  const series = weeks.map((wk, i) => {
+    const nextStart = i < weeks.length-1 ? weeks[i+1].start : new Date(wk.start.getTime()+7*24*3600*1000);
+    const weekEndTime = nextStart.getTime() - 1;
+    while (idx < sorted.length && sorted[idx].t <= weekEndTime) {
       lastVal = sorted[idx].v;
       idx++;
     }
-    return { ...mo, v: lastVal }; // v 可能是 null，畫圖時這幾個月不會畫線
+    return { y:wk.start.getFullYear(), m:wk.start.getMonth(), label: wk.label, v: lastVal };
   });
-  if (series.length) series[series.length-1].v = liveValueFn(); // 最後一個月永遠用即時值，不會是 null
+  if (series.length) series[series.length-1].v = liveValueFn(); // 本週永遠用即時值，不會是 null
   return series;
 }
 
@@ -1291,26 +1306,38 @@ function renderChart() {
   let lines = []; // 統一格式：{ key, label, color, series, isMain }
   if (showAll) {
     lines.push({ key:"total", label:"總資產", color:TOTAL_COLOR,
-      series: buildMonthlySeries(history, h=>h.v, ()=>netWorth()), isMain:true });
+      series: buildWeeklySeries(history, h=>h.v, ()=>netWorth()), isMain:true });
     GROUP_ORDER.forEach(cat=>{
       const cfg = getChartSeriesConfig(cat);
       lines.push({ key:cat, label:cfg.label, color:cfg.color,
-        series: buildMonthlySeries(history, cfg.histExtractor, cfg.liveValueFn), isMain:false });
+        series: buildWeeklySeries(history, cfg.histExtractor, cfg.liveValueFn), isMain:false });
     });
   } else {
     const cat = chartSeries;
     const cfg = getChartSeriesConfig(cat);
     lines.push({ key:cat, label:cfg.label, color:cfg.color,
-      series: buildMonthlySeries(history, cfg.histExtractor, cfg.liveValueFn), isMain:true });
+      series: buildWeeklySeries(history, cfg.histExtractor, cfg.liveValueFn), isMain:true });
     // 子項目：這個分類底下「目前」每一個資產，各自的走勢（資料來源是每週快照 asset_snapshots）
     assets.filter(a=>a.cat===cat).forEach(a=>{
       const assetHist = assetSnapshotHistory[a.id] || [];
       lines.push({ key:"asset:"+a.id, label:a.name, color:a.color,
-        series: buildMonthlySeries(assetHist, h=>h.v, ()=>valueOf(a)), isMain:false });
+        series: buildWeeklySeries(assetHist, h=>h.v, ()=>valueOf(a)), isMain:false });
     });
   }
 
   const n = lines[0].series.length;
+
+  // 先確認這幾條線裡，有沒有任何一條「至少有一個資料點」（哪怕只有本週這一個點，也該看得到）。
+  // 完全一個點都沒有的話（理論上很少發生，因為最新一週永遠會用即時值），才顯示尚無資料。
+  const anyDrawable = lines.some(ln => ln.series.some(pt => pt.v != null));
+  if (!anyDrawable) {
+    lastChartLayout = null;
+    svg.setAttribute("viewBox","0 0 340 120");
+    svg.innerHTML=`<text x="170" y="60" fill="#4b515c" font-size="12" text-anchor="middle">這個項目還沒有足夠的歷史資料</text>`;
+    document.getElementById("chartRange").textContent="—";
+    return;
+  }
+
   const W=340, H=168;
   const padL=42, padR=10, padT=14, padB=22;
   const plotW=W-padL-padR, plotH=H-padT-padB;
@@ -1330,7 +1357,7 @@ function renderChart() {
   [0, yMax*0.5, yMax].forEach(tv=>{
     const y = yAt(tv);
     axisSvg += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="#20222b" stroke-width="1"/>`;
-    axisSvg += `<text x="${padL-6}" y="${(y+3).toFixed(1)}" fill="#5b616e" font-size="9" text-anchor="end">${formatAxisNum(tv)}</text>`;
+    axisSvg += `<text x="${padL-6}" y="${(y+3).toFixed(1)}" fill="#5b616e" font-size="9" text-anchor="end">${netWorthHidden ? "•••" : formatAxisNum(tv)}</text>`;
   });
   // 畫 X 軸月份標籤（每隔幾個月標一次，避免 24 個全部擠在一起看不清楚）
   const labelStep = Math.ceil(n/6);
@@ -1349,21 +1376,25 @@ function renderChart() {
     if (firstIdx === -1) return; // 完全沒有任何資料，這條線整個跳過不畫
     const validPts = [];
     for (let i=firstIdx; i<n; i++) { if (s[i].v!=null) validPts.push([xAt(i), yAt(s[i].v)]); }
-    if (validPts.length < 2) return; // 只有一個點畫不出線，跳過（會在手勢查值時仍看得到這個點）
-    const line = smoothPath(validPts);
     const col = ln.color;
     const last = validPts[validPts.length-1];
     const opacity = ln.isMain ? 1 : 0.5;
-    if (ln.isMain) {
-      const area = line + ` L${last[0].toFixed(1)} ${(H-padB).toFixed(1)} L${validPts[0][0].toFixed(1)} ${(H-padB).toFixed(1)} Z`;
-      linesSvg += `<defs><linearGradient id="grad-${ln.key.replace(/[^a-zA-Z0-9]/g,'')}" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="${col}" stop-opacity="0.28"/>
-        <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
-      </linearGradient></defs>
-      <path d="${area}" fill="url(#grad-${ln.key.replace(/[^a-zA-Z0-9]/g,'')})"/>`;
+    if (validPts.length >= 2) {
+      // 有兩個點以上，可以連成線
+      const line = smoothPath(validPts);
+      if (ln.isMain) {
+        const area = line + ` L${last[0].toFixed(1)} ${(H-padB).toFixed(1)} L${validPts[0][0].toFixed(1)} ${(H-padB).toFixed(1)} Z`;
+        linesSvg += `<defs><linearGradient id="grad-${ln.key.replace(/[^a-zA-Z0-9]/g,'')}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${col}" stop-opacity="0.28"/>
+          <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
+        </linearGradient></defs>
+        <path d="${area}" fill="url(#grad-${ln.key.replace(/[^a-zA-Z0-9]/g,'')})"/>`;
+      }
+      const strokeW = ln.isMain ? 3 : 1.75;
+      linesSvg += `<path d="${line}" fill="none" stroke="${col}" stroke-width="${strokeW}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="${opacity}"/>`;
     }
-    const strokeW = ln.isMain ? 3 : 1.75;
-    linesSvg += `<path d="${line}" fill="none" stroke="${col}" stroke-width="${strokeW}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="${opacity}"/>`;
+    // 不管有沒有連成線，只要有資料（哪怕只有本週這一個點），都要畫出最後一個點的圓點，
+    // 不然資料還很少的時候（例如剛開始蒐集），本週的點會完全看不到，像是壞掉一樣。
     linesSvg += `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="${ln.isMain?4:2.5}" fill="${col}" fill-opacity="${opacity}"/>`;
   });
 
@@ -1417,7 +1448,7 @@ function updateChartScrub(clientX) {
       return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0">
         <span style="width:7px;height:7px;border-radius:50%;background:${ln.color};flex-shrink:0"></span>
         <span style="color:#8a94a6;font-size:11px">${ln.label}</span>
-        <span style="margin-left:auto;color:#e8eaed;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums">${nf(pt.v)}</span>
+        <span style="margin-left:auto;color:#e8eaed;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums">${mnf(pt.v)}</span>
       </div>`;
     }).join("");
     tip.innerHTML = `<div style="font-size:10px;color:#5b616e;margin-bottom:3px">${labelSeries[idx].label}</div>${rows}`;
@@ -1487,7 +1518,7 @@ function openAdjust(id) {
   const a=assets.find(x=>x.id===id); if(!a) return;
   const isCash=a.cat==="cash";
   const unit=CATEGORIES[a.cat].unit;
-  const sub = isCash?`目前 ${nf(a.balance)}`:`持有 ${a.qty} ${unit} · ${nf(valueOf(a))}`;
+  const sub = isCash?`目前 ${mnf(a.balance)}`:`持有 ${a.qty} ${unit} · ${mnf(valueOf(a))}`;
   let dir="add";
   const qtyIsWhole = isWholeShareCat(a.cat);
 
@@ -1689,7 +1720,7 @@ function openOtherSheet(other) {
     const unit=CATEGORIES[a.cat].unit;
     return `<div class="legend-item" data-id="${a.id}" style="justify-content:space-between;width:100%;padding:12px 0;border-bottom:1px solid #1f222a">
       <span style="display:flex;align-items:center;gap:9px"><span class="swatch" style="background:${a.color}"></span><span class="li-name">${a.name}</span></span>
-      <span style="font-size:13px;color:#8a94a6;font-variant-numeric:tabular-nums">${nf(valueOf(a))}</span>
+      <span style="font-size:13px;color:#8a94a6;font-variant-numeric:tabular-nums">${mnf(valueOf(a))}</span>
     </div>`;
   }).join("");
   const sheet=showSheet(`
@@ -1868,7 +1899,7 @@ function openAdd() {
             <span style="font-size:14px;font-weight:600;color:#e8eaed">${fromName} → ${toName}</span>
             <span style="font-size:11px;color:${r.active?'#3fb07a':'#6b7280'}">${r.active?'啟用中':'已暫停'}</span>
           </div>
-          <div style="font-size:12px;color:#8a94a6">每月 ${daysTxt}・每次投入 ${nf(r.amount_twd)} 元（依執行當下即時價換算）</div>
+          <div style="font-size:12px;color:#8a94a6">每月 ${daysTxt}・每次投入 ${mnf(r.amount_twd)} 元（依執行當下即時價換算）</div>
           <div style="display:flex;gap:8px;margin-top:8px">
             <button class="quick-btn rule-toggle" style="flex:1">${r.active?'暫停':'恢復'}</button>
             <button class="quick-btn rule-delete" style="flex:1;color:#d9645a">刪除</button>
@@ -2000,7 +2031,7 @@ eyeBtn.onclick = () => {
   netWorthHidden = !netWorthHidden;
   try { localStorage.setItem("assel_nwHidden", netWorthHidden ? "1" : "0"); } catch(e) {}
   updateEyeIcon();
-  document.getElementById("networth").textContent = netWorthHidden ? "•••••••" : nf(animatedNW);
+  renderAll(false); // 重新渲染整個畫面（方塊、組成清單、圖表），讓所有地方的金額同步隱藏／顯示
 };
 document.getElementById("refreshBtn").onclick=()=>refreshPrices(false);
 
