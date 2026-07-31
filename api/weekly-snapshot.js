@@ -11,8 +11,10 @@
 //   SUPABASE_ANON_KEY 例：eyJhbGci....
 
 export default async function handler(req, res) {
-  const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+  // trim() 防呆：環境變數複製貼上很容易不小心夾帶結尾換行或空白字元，
+  // 直接接在網址後面會讓路徑變得不對、回傳 404——這裡先自動去除，多一層保險
+  const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, ""); // 順便去掉結尾多餘的斜線
+  const SUPABASE_ANON_KEY = (process.env.SUPABASE_ANON_KEY || "").trim();
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     return res.status(500).json({ error: "缺少環境變數 SUPABASE_URL / SUPABASE_ANON_KEY" });
   }
@@ -41,8 +43,14 @@ export default async function handler(req, res) {
       }
     }
 
-    const assetsRes = await fetch(`${SUPABASE_URL}/rest/v1/assets?select=*`, { headers });
-    if (!assetsRes.ok) throw new Error("讀取資產失敗 " + assetsRes.status);
+    const assetsUrl = `${SUPABASE_URL}/rest/v1/assets?select=*`;
+    const assetsRes = await fetch(assetsUrl, { headers });
+    if (!assetsRes.ok) {
+      // 診斷用：把實際打的網址（開頭部分，網址本身不是密鑰不用遮）跟 Supabase 回傳的錯誤內容都帶出來，
+      // 不用再用猜的——404 幾乎都是 SUPABASE_URL 這個環境變數本身有問題（打錯、多斜線、多空白等）
+      const bodyText = await assetsRes.text().catch(()=>"(無法讀取回應內容)");
+      throw new Error(`讀取資產失敗 ${assetsRes.status}｜實際呼叫網址: ${assetsUrl}｜Supabase 回應: ${bodyText.slice(0,300)}`);
+    }
     const assetList = await assetsRes.json();
 
     const valueOf = a => a.cat === "cash" ? Number(a.balance || 0) : Number(a.qty || 0) * Number(a.price || 0);
