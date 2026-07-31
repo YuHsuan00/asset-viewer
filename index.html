@@ -998,7 +998,8 @@ let chartScrubbing = false;
 // 規則：每月取「當月最後一筆」的值；該月沒有變動就沿用前一個有資料的月份（forward-fill）
 //      24 個月內完全沒有任何歷史資料的月份，往前抓不到值時，用「當前值」墊底
 // histExtractor：從一筆歷史快照裡取出「這個系列」的值（沒有資料回傳 null，代表這個點跳過不用）
-// liveValueFn：算出「現在當下」這個系列的即時值，蓋掉最後一個月（本月），讓線的終點永遠反映最新狀態
+// liveValueFn：算出「現在當下」這個系列的即時值，會在序列最後多補一個「今天」的點，
+//              不會蓋掉本週（週一為標籤）那格原本的歷史快照值，兩者分開顯示。
 // sourceHistory：資料來源陣列（可以是全域淨值歷史 history，也可以是單一資產的每週快照）
 // 圖表要顯示幾週：資料還不多，先顯示 26 週，之後累積夠了可以改成 52（一年）或 104（兩年）
 const CHART_WEEKS = 26;
@@ -1035,7 +1036,9 @@ function buildWeeklySeries(sourceHistory, histExtractor, liveValueFn) {
     }
     return { y:wk.start.getFullYear(), m:wk.start.getMonth(), label: wk.label, v: lastVal };
   });
-  if (series.length) series[series.length-1].v = liveValueFn(); // 本週永遠用即時值，不會是 null
+  // 本週（週一那格）維持它自己實際累積到的歷史值，不被即時值蓋掉。
+  // 另外多補一個「今天」的點掛在最尾端，永遠用即時值，讓線的終點還是能反映最新狀態。
+  series.push({ y: today.getFullYear(), m: today.getMonth(), label: `${today.getMonth()+1}/${today.getDate()}`, v: liveValueFn() });
   return series;
 }
 
@@ -1172,11 +1175,14 @@ function renderChart() {
     axisSvg += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="#20222b" stroke-width="1"/>`;
     axisSvg += `<text x="${padL-6}" y="${(y+3).toFixed(1)}" fill="#5b616e" font-size="9" text-anchor="end">${netWorthHidden ? "•••" : formatAxisNum(tv)}</text>`;
   });
-  // 畫 X 軸月份標籤（每隔幾個月標一次，避免 24 個全部擠在一起看不清楚）
+  // 畫 X 軸日期標籤（每隔幾格標一次，避免全部擠在一起看不清楚），最右邊「今天」那格一定要標到
   const labelStep = Math.ceil(n/6);
   const labelSeries = lines[0].series;
   for (let i=0;i<n;i+=labelStep) {
     axisSvg += `<text x="${xAt(i).toFixed(1)}" y="${H-6}" fill="#5b616e" font-size="9" text-anchor="middle">${labelSeries[i].label}</text>`;
+  }
+  if ((n-1) % labelStep !== 0) {
+    axisSvg += `<text x="${xAt(n-1).toFixed(1)}" y="${H-6}" fill="#5b616e" font-size="9" text-anchor="middle">${labelSeries[n-1].label}</text>`;
   }
 
   // 畫每一條線：沒有資料(null)的月份直接跳過不連線，只從「第一筆真的有資料」的月份開始畫，
