@@ -68,20 +68,10 @@
   #treemap-inner { position: relative; width: 100%; height: 100%; }
   .tile {
     position: absolute; padding: 3.5px; cursor: pointer;
-    /* touch-action 一定要一開始就是 none，不能「先 pan-y、長按後才切成 none」——
-       瀏覽器是在手指剛觸碰的那一刻就決定好怎麼處理這個手勢，事後用 class 切換不會生效，
-       瀏覽器依然會照最初的判斷繼續把移動當成頁面捲動處理，這正是「拖曳時方塊被頁面捲動搶走」的成因。
-       改成從頭到尾都是 none，完全不讓瀏覽器插手，捲動改成我們自己在 globalPointerMove 手動模擬。 */
-    touch-action: none;
+    /* 拖曳排列功能已移除，方塊只能點擊，不再需要自己接管 touch 手勢——
+       讓瀏覽器用最順的原生方式處理滑動，不用任何 touch-action 限制 */
     transition: left .55s cubic-bezier(.34,1.15,.4,1), top .55s cubic-bezier(.34,1.15,.4,1),
                 width .55s cubic-bezier(.34,1.15,.4,1), height .55s cubic-bezier(.34,1.15,.4,1);
-  }
-  .tile.dragging {
-    cursor: grabbing;
-  }
-  .tile.dragging .tile-inner {
-    box-shadow: 0 14px 34px rgba(0,0,0,.45) !important;
-    transform: scale(1.045);
   }
   .tile-inner {
     width: 100%; height: 100%; border-radius: 14px;
@@ -904,191 +894,9 @@ function renderTreemap() {
   Object.keys(existing).forEach(id=>{ if(!seen.has(id)) existing[id].remove(); });
 }
 
-// ── 方塊互動：輕點 = 開啟調整面板；長按 0.32s 後拖曳 = 調整同類別內的顯示順序 ──
-// 拖曳時其他方塊會依 squarified treemap 重新計算、平滑流動讓位（既有的 CSS transition 負責這段動畫）
-const LONG_PRESS_MS = 320;
-const MOVE_CANCEL_PX = 10; // 長按計時器觸發前，手指移動超過這個距離視為滑動頁面，取消拖曳
-
-// ── 全域共用的拖曳狀態：整個 App 從頭到尾只有「一組」pointermove/pointerup 監聽器，
-// 不是每個方塊各自臨時掛一套。原本「按下才掛、放開才拆」的做法，若手機瀏覽器偶爾
-// 沒確實觸發 pointerup/pointercancel（快速滑動、被系統手勢打斷等），殘留的監聽器
-// 拆不掉，多組疊加執行就會讓畫面滑動時抖動。改成固定一組監聽器＋共用狀態物件後，
-// 不管有沒有確實觸發收尾，都不會有「監聽器疊加」的問題。
-let dragState = null; // null = 目前沒有任何方塊在被按住/拖曳
-
-// 拖曳位置更新節流：DOM 寫入節流到「每個動畫影格最多一次」（用 requestAnimationFrame），
-// 不要每次 pointermove 事件一觸發就馬上寫 DOM——這是主流拖曳套件（dnd-kit、Framer Motion 等）
-// 常見的做法，觸控取樣頻率常常比螢幕更新頻率高，直接每次事件都寫 DOM 反而容易卡頓。
-let dragRAF = null;
-function scheduleDragUpdate() {
-  if (dragRAF != null) return;
-  dragRAF = requestAnimationFrame(() => { dragRAF = null; applyDragPosition(); });
-}
-
-// 邊緣自動捲動：拖曳中手指靠近螢幕上/下邊緣時，頁面會自動朝那個方向微幅捲動，
-// 這樣才能把方塊拖到目前看不到、需要捲動才能看到的位置——這是 Trello、Notion 等
-// 主流拖放介面的標準做法，之前完全沒做，才會「拿起方塊後在可視範圍內卡住」。
-const EDGE_ZONE = 72;        // 距離螢幕上/下邊緣多少像素以內，開始自動捲動
-const MAX_SCROLL_SPEED = 15; // 最靠近邊緣時，每個影格捲動的最大像素數（離邊緣越近，捲越快）
-let autoScrollRAF = null;
-
-function autoScrollLoop() {
-  if (!dragState || !dragState.dragActive) { autoScrollRAF = null; return; }
-  const y = dragState.lastPointerClientY;
-  const vh = window.innerHeight;
-  let dy = 0;
-  if (y < EDGE_ZONE) dy = -MAX_SCROLL_SPEED * (1 - Math.max(0,y)/EDGE_ZONE);
-  else if (y > vh - EDGE_ZONE) dy = MAX_SCROLL_SPEED * (1 - Math.max(0, vh-y)/EDGE_ZONE);
-  if (dy !== 0) {
-    window.scrollBy(0, dy);
-    applyDragPosition(); // 頁面捲動了，就算手指沒動，方塊位置也要立刻跟著同步，不能只靠 pointermove 觸發
-    autoScrollRAF = requestAnimationFrame(autoScrollLoop);
-  } else {
-    autoScrollRAF = null; // 手指已經離開邊緣區，停止自動捲動迴圈
-  }
-}
-function maybeStartAutoScroll() {
-  if (autoScrollRAF != null || !dragState) return;
-  const y = dragState.lastPointerClientY;
-  const vh = window.innerHeight;
-  if (y < EDGE_ZONE || y > vh - EDGE_ZONE) autoScrollRAF = requestAnimationFrame(autoScrollLoop);
-}
-
-function resetDragState() {
-  if (dragState) {
-    clearTimeout(dragState.timer);
-    dragState.el.classList.remove("dragging");
-    dragState.el.style.zIndex = "";
-    dragState.el.style.transition = "";
-  }
-  if (autoScrollRAF != null) { cancelAnimationFrame(autoScrollRAF); autoScrollRAF = null; }
-  if (dragRAF != null) { cancelAnimationFrame(dragRAF); dragRAF = null; }
-  draggingId = null;
-  dragState = null;
-}
-
-// 把資產從目前列陣結構中移除，再依「意圖」插入：
-// mode='row'：插進目標的同一排（橫排並列）；mode='newrow'：在目標排的上/下方插入新的一排（直排堆疊）
-function applyIntent(cat, assetId, intent) {
-  const rows = categoryLayout[cat];
-  if (!rows) return;
-  for (let i=rows.length-1;i>=0;i--) {
-    const idx = rows[i].indexOf(assetId);
-    if (idx>=0) { rows[i].splice(idx,1); if (rows[i].length===0) rows.splice(i,1); break; }
-  }
-  let targetRow=-1, targetCol=-1;
-  for (let i=0;i<rows.length;i++){ const idx=rows[i].indexOf(intent.targetId); if(idx>=0){targetRow=i;targetCol=idx;break;} }
-  if (targetRow===-1) { rows.push([assetId]); return; }
-  if (intent.mode==="row") {
-    const insertAt = intent.before ? targetCol : targetCol+1;
-    rows[targetRow].splice(insertAt, 0, assetId);
-  } else {
-    const newRowIdx = intent.before ? targetRow : targetRow+1;
-    rows.splice(newRowIdx, 0, [assetId]);
-  }
-}
-
-// 真正套用拖曳中方塊的新位置＋判斷疊在哪個目標上。抽成獨立函式，讓 pointermove 事件
-// 跟自動捲動迴圈都能呼叫（兩者都可能需要「重新算一次位置」：手指移動、或頁面自動捲動）。
-function applyDragPosition() {
-  if (!dragState || !dragState.dragActive) return;
-  const { el, assetRef } = dragState;
-  const a = assets.find(x=>x.id===assetRef.id);
-  if (!a) { resetDragState(); return; }
-
-  // dx/dy 是「文件座標系」下的位移量：手指在螢幕上的位移 + 這段期間頁面額外捲動的量。
-  // 一定要把捲動量加進去——方塊的 left/top 是相對「文件」而不是相對「螢幕」，
-  // 如果拖曳中頁面又自動捲動了卻沒把這段位移算進來，方塊會跟手指對不齊、亂飄。
-  const dx = dragState.lastPointerClientX - dragState.startX;
-  const dy = (dragState.lastPointerClientY - dragState.startY) + (window.scrollY - dragState.scrollYAtStart);
-  let newLeft = dragState.startLeft + dx, newTop = dragState.startTop + dy;
-
-  // 限制拖曳範圍：不能整個方塊都跑到容器外面（避免畫布被撐大），
-  // 但中心點要能真正抵達邊界——所以允許方塊懸出邊界最多「半個身位」，
-  // 不是把整塊都夾在容器內（那樣中心永遠到不了邊緣，是之前的錯誤做法）
-  const container = document.getElementById("treemap-inner");
-  if (container) {
-    const halfW = dragState.hitW/2, halfH = dragState.hitH/2;
-    newLeft = Math.min(Math.max(newLeft, -halfW), container.clientWidth - halfW);
-    newTop = Math.min(Math.max(newTop, -halfH), container.clientHeight - halfH);
-  }
-
-  el.style.left = newLeft+"px";
-  el.style.top = newTop+"px";
-
-  // 用拖曳方塊的中心點，判斷目前疊在哪個方塊上
-  // 自由模式（freeMode）下不限制類別；否則只在同類別內判定
-  // 這裡刻意用「拿起來那一刻」凍結的 hitW/hitH，不用即時 DOM 尺寸，
-  // 否則方塊視覺變形會回頭影響判定、判定又觸發變形，形成抖動的回饋迴圈
-  const cx = newLeft + dragState.hitW/2, cy = newTop + dragState.hitH/2;
-  const hovered = lastNodes.find(n =>
-    n.id !== assetRef.id && n.ref && !n.ref.isOther && (freeMode || n.ref.cat === a.cat) &&
-    cx >= n.x && cx <= n.x+n.w && cy >= n.y && cy <= n.y+n.h
-  );
-  if (!hovered) return;
-
-  // 判斷落點在目標方塊的哪個象限：離左右邊近 → 橫排插入同一排；離上下邊近 → 直排插入新的一排
-  const relX = (cx - hovered.x) / hovered.w;
-  const relY = (cy - hovered.y) / hovered.h;
-  const distX = Math.min(relX, 1-relX);
-  const distY = Math.min(relY, 1-relY);
-  const intent = distX < distY
-    ? { mode:"row",    targetId: hovered.id, before: relX < 0.5 }
-    : { mode:"newrow", targetId: hovered.id, before: relY < 0.5 };
-  const key = `${intent.mode}:${intent.targetId}:${intent.before}`;
-  if (key === dragState.lastIntentKey) return;
-  dragState.lastIntentKey = key;
-
-  applyIntent(layoutKey(a), a.id, intent);
-  dragState.layoutTouched = true;
-  renderTreemap(); // 其他方塊依新結構平滑重新排列、讓位；拖曳中的方塊也會跟著變形（見 dragging 的 transition 設定）
-}
-
-function globalPointerMove(e) {
-  if (!dragState) return;
-  dragState.lastPointerClientX = e.clientX;
-  dragState.lastPointerClientY = e.clientY;
-
-  if (!dragState.dragActive) {
-    // .tile 現在一律是 touch-action:none（瀏覽器完全不會插手任何捲動），
-    // 所以「長按判定前、看起來像滑頁面」的這段，捲動要靠我們自己模擬。
-    // 先在無反應區內完全不做任何事（不捲動、不取消長按計時），
-    // 避免手拿著手機的自然手震被誤判成「要捲動」而讓畫面抖動；
-    // 超過門檻後才確定是滑動意圖，開始手動跟手捲動。
-    const dx0 = e.clientX-dragState.startX, dy0=e.clientY-dragState.startY;
-    if (!dragState.scrolling) {
-      if (Math.hypot(dx0,dy0) > MOVE_CANCEL_PX) {
-        clearTimeout(dragState.timer); dragState.timer=null;
-        dragState.scrolling = true;
-        dragState.lastScrollY = e.clientY; // 從超過門檻的這一刻開始才手動捲動，之後跟手捲動
-      }
-      return;
-    }
-    e.preventDefault();
-    const dyFrame = e.clientY - dragState.lastScrollY;
-    dragState.lastScrollY = e.clientY;
-    window.scrollBy(0, -dyFrame);
-    return;
-  }
-
-  e.preventDefault();
-  scheduleDragUpdate();   // DOM 寫入節流到下一個動畫影格
-  maybeStartAutoScroll(); // 手指若已經在邊緣區，啟動自動捲動迴圈
-}
-
-function globalPointerUp() {
-  if (!dragState) return;
-  const { el, assetRef, dragActive, scrolling, layoutTouched } = dragState;
-
-  if (!dragActive) {
-    clearTimeout(dragState.timer);
-    dragState = null;
-    // 這次手勢如果已經被判定成「滑動頁面」，放開手指時就不該當成點擊——
-    // 不然一段長距離滑動通常是由好幾段「滑一下、放開、再滑一下」組成，
-    // 只要某一段剛好是從方塊上開始滑，放開瞬間就會被誤判成點擊、彈出調整視窗，
-    // 滑好幾段就跳好幾次，看起來就像視窗一直跳出來又收回去。
-    if (scrolling) return;
-    // 沒有觸發拖曳、也不是滑動（純粹快速輕點）：視為一般點擊，開啟調整面板
+// ── 方塊互動：點擊 = 開啟調整面板（拖曳排列功能已移除，方塊只能點擊，不能拖動調整順序）──
+function attachTileInteraction(el, assetRef) {
+  el.addEventListener("click", () => {
     if (assetRef.isOther) {
       // 「其他」方塊每次渲染都會產生全新的 members 清單，這裡的 assetRef 是建立當下綁定的閉包、
       // 可能是舊資料；改成即時去 lastNodes（每次渲染都會更新）撈最新的一份，避免點開內容過期
@@ -1097,56 +905,6 @@ function globalPointerUp() {
     } else {
       openAdjust(assetRef.id);
     }
-    return;
-  }
-
-  const key = layoutKey(assetRef);
-  resetDragState();
-  renderTreemap(); // 放開後，讓拖曳方塊也平滑歸位到最終計算出的格子（含形狀）
-  if (layoutTouched) saveCategoryLayout(key);
-}
-
-// App 從頭到尾只掛這一套，永遠不拆卸
-window.addEventListener("pointermove", globalPointerMove, { passive:false });
-window.addEventListener("pointerup", globalPointerUp);
-window.addEventListener("pointercancel", globalPointerUp);
-// 保險：分頁切到背景、視窗失焦時強制清空，避免任何邊界情況卡住殘留狀態
-window.addEventListener("blur", resetDragState);
-document.addEventListener("visibilitychange", ()=>{ if (document.hidden) resetDragState(); });
-
-function attachTileInteraction(el, assetRef) {
-  el.addEventListener("pointerdown", (e) => {
-    if (e.button !== undefined && e.button !== 0) return; // 只回應主要按鍵/單指
-    if (dragState) return; // 已經有其他方塊正在處理中（理論上不會發生，多一層保險）
-
-    dragState = {
-      el, assetRef,
-      startX: e.clientX, startY: e.clientY,
-      lastPointerClientX: e.clientX, lastPointerClientY: e.clientY,
-      startLeft: parseFloat(el.style.left)||0,
-      startTop: parseFloat(el.style.top)||0,
-      scrollYAtStart: window.scrollY, // 記下拖曳開始當時的捲動位置，供後續計算「這段期間頁面額外捲動了多少」
-      dragActive: false,
-      scrolling: false, // 是否已確認這次手勢是「滑動頁面」（純粹用來標記不是點擊，捲動本身交給瀏覽器原生處理）
-      hitW: 0, hitH: 0, // 判定用的固定尺寸（拿起來那一刻凍結）
-      lastIntentKey: null,
-      layoutTouched: false, // 這次拖曳是否真的改動了版面結構
-      timer: null,
-    };
-
-    dragState.timer = setTimeout(() => {
-      if (!dragState || dragState.el !== el) return; // 這期間已經放開或換了別的方塊，作廢
-      if (assetRef.isOther) { dragState = null; return; } // 「其他」聚合方塊不支援拖曳
-      dragState.dragActive = true;
-      draggingId = assetRef.id;
-      dragState.hitW = parseFloat(el.style.width)||0;
-      dragState.hitH = parseFloat(el.style.height)||0;
-      el.classList.add("dragging");
-      el.style.zIndex = "40";
-      // 位置(left/top)不放進 transition，才能精準跟著手指；
-      // 但把 width/height 放進去，讓拖曳中的方塊「視覺上」能隨版面變化平滑變形（純視覺，不影響判定）
-      el.style.transition = "width .22s ease, height .22s ease, box-shadow .2s ease, transform .15s ease";
-    }, LONG_PRESS_MS);
   });
 }
 
