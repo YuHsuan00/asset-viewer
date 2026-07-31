@@ -408,7 +408,10 @@ async function loadNetWorthHistory() {
 
 // 讀近 24 個月「每個資產」自己的每週快照（asset_snapshots 表），供「點進某分類後看子項目走勢」用。
 // 用 asset_id 分組，整理成 { assetId: [{t,v}, ...] } 方便丟進 buildMonthlySeries。
+// 同時也依「分類 + 日期」加總，整理成 categorySnapshotHistory = { cat: [{t,v}, ...] }，
+// 供第一層分類的走勢線在 net_worth_history.breakdown 缺資料時當 fallback 用（見 buildCategoryHistory）。
 let assetSnapshotHistory = {};
+let categorySnapshotHistory = {};
 async function loadAssetSnapshots() {
   if (!cloudOn()) return false;
   try {
@@ -416,19 +419,52 @@ async function loadAssetSnapshots() {
     since.setMonth(since.getMonth() - 24);
     const sinceStr = since.toISOString().slice(0,10);
     const { data, error } = await sb.from("asset_snapshots")
-      .select("asset_id,value,snapshot_date")
+      .select("asset_id,cat,value,snapshot_date")
       .gte("snapshot_date", sinceStr)
       .order("snapshot_date", { ascending: true })
       .limit(20000);
     if (error) throw error;
     const grouped = {};
+    const dateCatSum = {}; // { "2026-07-27": { cash: 12345, ... } }
     (data||[]).forEach(r => {
       if (!grouped[r.asset_id]) grouped[r.asset_id] = [];
       grouped[r.asset_id].push({ t: new Date(r.snapshot_date+"T12:00:00").getTime(), v: Number(r.value) });
+      if (r.cat) {
+        if (!dateCatSum[r.snapshot_date]) dateCatSum[r.snapshot_date] = {};
+        dateCatSum[r.snapshot_date][r.cat] = (dateCatSum[r.snapshot_date][r.cat] || 0) + Number(r.value);
+      }
     });
     assetSnapshotHistory = grouped;
+    const byCat = {};
+    Object.keys(dateCatSum).forEach(dateStr => {
+      const t = new Date(dateStr+"T12:00:00").getTime();
+      Object.entries(dateCatSum[dateStr]).forEach(([cat, v]) => {
+        if (!byCat[cat]) byCat[cat] = [];
+        byCat[cat].push({ t, v });
+      });
+    });
+    Object.values(byCat).forEach(arr => arr.sort((a,b)=>a.t-b.t));
+    categorySnapshotHistory = byCat;
     return true;
   } catch(e) { console.warn("每週資產快照載入失敗:", e.message); return false; }
+}
+
+// 分類走勢資料來源：優先用 net_worth_history.breakdown（同一時間點總覽較準確），
+// 缺資料的日期（breakdown 是 null，例如 breakdown 欄位還沒開始蒐集前的舊資料）
+// 就用 asset_snapshots 依日期把同分類底下所有資產加總補上，兩邊用「同一天」對齊合併。
+function buildCategoryHistory(cat) {
+  const byDateKey = new Map(); // "yyyy-mm-dd" -> {t,v}
+  history.forEach(h => {
+    if (h.b && h.b[cat] != null) {
+      const dateKey = new Date(h.t).toISOString().slice(0,10);
+      byDateKey.set(dateKey, { t: h.t, v: Number(h.b[cat]) });
+    }
+  });
+  (categorySnapshotHistory[cat] || []).forEach(s => {
+    const dateKey = new Date(s.t).toISOString().slice(0,10);
+    if (!byDateKey.has(dateKey)) byDateKey.set(dateKey, s); // breakdown 有資料的日期優先，不覆蓋
+  });
+  return Array.from(byDateKey.values()).sort((a,b)=>a.t-b.t);
 }
 
 // 手動排版結構（拖曳決定的橫排/直排）存回雲端
@@ -1013,7 +1049,9 @@ function getChartSeriesConfig(key) {
     };
   }
   return {
-    histExtractor: h => (h.b && h.b[key] != null) ? Number(h.b[key]) : null,
+    // 分類的 histExtractor 直接讀 h.v：sourceHistory 這邊改由 buildCategoryHistory(key) 提供，
+    // 已經把 net_worth_history.breakdown 跟 asset_snapshots 加總 fallback 合併好了。
+    histExtractor: h => h.v,
     liveValueFn: () => assets.filter(a=>a.cat===key).reduce((s,a)=>s+valueOf(a),0),
     label: CATEGORIES[key].label,
     color: getPalette(key)[2], // 用該分類色系中間深淺的一階，跟 treemap 方塊顏色呼應
@@ -1085,13 +1123,13 @@ function renderChart() {
     GROUP_ORDER.forEach(cat=>{
       const cfg = getChartSeriesConfig(cat);
       lines.push({ key:cat, label:cfg.label, color:cfg.color,
-        series: buildWeeklySeries(history, cfg.histExtractor, cfg.liveValueFn), isMain:false });
+        series: buildWeeklySeries(buildCategoryHistory(cat), cfg.histExtractor, cfg.liveValueFn), isMain:false });
     });
   } else {
     const cat = chartSeries;
     const cfg = getChartSeriesConfig(cat);
     lines.push({ key:cat, label:cfg.label, color:cfg.color,
-      series: buildWeeklySeries(history, cfg.histExtractor, cfg.liveValueFn), isMain:true });
+      series: buildWeeklySeries(buildCategoryHistory(cat), cfg.histExtractor, cfg.liveValueFn), isMain:true });
     // 子項目：這個分類底下「目前」每一個資產，各自的走勢（資料來源是每週快照 asset_snapshots）
     assets.filter(a=>a.cat===cat).forEach(a=>{
       const assetHist = assetSnapshotHistory[a.id] || [];
