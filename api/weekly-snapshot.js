@@ -1,6 +1,9 @@
-// Vercel Cron Job — 每週五台灣時間晚上 9 點自動執行一次，
-// 把「當下每一個資產」的狀態各記一筆快照，存進 asset_snapshots 表。
-// 這是打底工程：先開始累積資料，方便以後要做「單一資產的長期走勢」之類的功能時已經有歷史可用。
+// Vercel Cron Job — 每週五台灣時間晚上 9 點自動執行一次：
+// 1. 把「當下每一個資產」的狀態各記一筆快照，存進 asset_snapshots 表（供單一資產走勢用）
+// 2. 順便也補記一筆帶「分類明細」的淨值快照到 net_worth_history（供大分類走勢用）——
+//    分類明細平常是使用者手動調整資產時才會記錄（事件觸發），如果使用者這幾天很少動手調整，
+//    分類線就會一直卡在很少的資料點。這裡讓它額外搭一班「排程觸發」的順風車，
+//    至少每週都會穩定多一個點，不會完全被使用頻率綁死。
 // 排程設定在根目錄的 vercel.json。
 //
 // 需要在 Vercel 專案設定 → Environment Variables 加兩個變數（跟其他 API 共用同一組）：
@@ -42,14 +45,13 @@ export default async function handler(req, res) {
     if (!assetsRes.ok) throw new Error("讀取資產失敗 " + assetsRes.status);
     const assetList = await assetsRes.json();
 
-    const rows = assetList.map(a => {
-      const value = a.cat === "cash" ? Number(a.balance || 0) : Number(a.qty || 0) * Number(a.price || 0);
-      return {
-        asset_id: a.id, name: a.name, cat: a.cat,
-        value, qty: a.qty ?? null, price: a.price ?? null,
-        snapshot_date: todayStr,
-      };
-    });
+    const valueOf = a => a.cat === "cash" ? Number(a.balance || 0) : Number(a.qty || 0) * Number(a.price || 0);
+
+    const rows = assetList.map(a => ({
+      asset_id: a.id, name: a.name, cat: a.cat,
+      value: valueOf(a), qty: a.qty ?? null, price: a.price ?? null,
+      snapshot_date: todayStr,
+    }));
 
     if (rows.length) {
       const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/asset_snapshots`, {
@@ -57,6 +59,18 @@ export default async function handler(req, res) {
       });
       if (!insertRes.ok) throw new Error("寫入快照失敗 " + insertRes.status);
     }
+
+    // 額外補一筆帶分類明細的淨值快照（跟 App 裡 saveNetWorthSnapshot() 存的格式一致）
+    const CATS = ["cash", "crypto", "stock_tw", "stock_us"];
+    const breakdown = {};
+    CATS.forEach(cat => {
+      breakdown[cat] = assetList.filter(a => a.cat === cat).reduce((s,a) => s + valueOf(a), 0);
+    });
+    const totalValue = Object.values(breakdown).reduce((s,v) => s+v, 0);
+    const nwRes = await fetch(`${SUPABASE_URL}/rest/v1/net_worth_history`, {
+      method: "POST", headers, body: JSON.stringify({ value: totalValue, breakdown }),
+    });
+    if (!nwRes.ok) console.warn("補記分類明細快照失敗（不影響資產快照本身）:", nwRes.status);
 
     return res.status(200).json({ ok: true, recorded: rows.length, date: todayStr });
   } catch (e) {
