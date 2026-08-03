@@ -116,6 +116,7 @@
   .day-btn:active { transform: scale(.92); }
   .legend-head .g-name { font-size: 12px; color: #6b7280; letter-spacing: 1px; }
   .legend-head .g-val { font-size: 12px; color: #8a94a6; font-variant-numeric: tabular-nums; }
+  .legend-head .g-pct { margin-left: 6px; color: #5b616e; font-size: 11px; }
   .legend-items { display: flex; flex-wrap: wrap; gap: 8px 16px; }
   .legend-item { display: flex; align-items: center; gap: 7px; cursor: pointer; }
   .swatch { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
@@ -225,10 +226,6 @@
   <div class="wrap">
     <div class="section-label" style="display:flex;align-items:center;justify-content:space-between">
       <span>組成</span>
-      <button class="mode-btn" id="freeModeBtn" title="自由排列：關閉同類別限制">
-        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
-        <span>自由排列</span>
-      </button>
     </div>
     <div id="legend"></div>
   </div>
@@ -472,7 +469,7 @@ async function saveCategoryLayout(cat) {
   if (!cloudOn()) return;
   try {
     const payload = { cat, rows: categoryLayout[cat] || [] };
-    if (CATEGORIES[cat]) payload.theme = CATEGORIES[cat].theme; // 只有真實類別（非 __free__/__other__）才有主題
+    if (CATEGORIES[cat]) payload.theme = CATEGORIES[cat].theme; // 只有真實類別（非 __other__）才有主題
     await sb.from("category_layout").upsert(payload);
   } catch(e) { console.warn("版面儲存失敗:", e.message); }
 }
@@ -665,38 +662,13 @@ function healCategoryLayouts(bigList) {
   });
 }
 
-// 自由排列模式：關閉後不再限制「同類別才能排在一起」，所有資產可以自由跟任何資產排在同一排
-let freeMode = false;
-try { freeMode = localStorage.getItem("assel_freeMode") === "1"; } catch(e) {}
-
-// 拖曳/存版面時要用的 key：自由模式下大家共用同一份 "__free__" 版面，否則各類別各自一份
-function layoutKey(a) { return freeMode ? "__free__" : a.cat; }
+// 拖曳/存版面時要用的 key：現在只依分類分開存版面（自由排列模式已移除）
+function layoutKey(a) { return a.cat; }
 
 function layoutGrouped(w, h) {
   const { big, small } = buildDisplayItems();
   const smallVal = small.reduce((s,a)=>s+valueOf(a),0);
 
-  if (freeMode) {
-    // 自由模式：所有資產（不分類別）混在同一份 rows 結構裡，僅跟「其他」分開兩區
-    if (ensureCategoryLayout("__free__", big.map(a=>a.id))) saveCategoryLayout("__free__");
-    const groups = [];
-    const bigVal = big.reduce((s,a)=>s+valueOf(a),0);
-    if (bigVal>0) groups.push({ key:"__free__", value:bigVal, other:false });
-    if (smallVal>0) groups.push({ key:"__other__", list:small, value:smallVal, other:true });
-
-    const gNodes = layoutTreemap(groups, 0,0,w,h);
-    let all=[];
-    gNodes.forEach(gn=>{
-      if (gn.other) {
-        all.push({ id:"__other__", value:gn.value, ref:{ id:"__other__", name:"其他", color:OTHER_COLOR, isOther:true, members:gn.list },
-          x:gn.x, y:gn.y, w:gn.w, h:gn.h });
-      } else {
-        const inner = layoutRows(categoryLayout["__free__"] || [], gn.x, gn.y, gn.w, gn.h);
-        all = all.concat(inner);
-      }
-    });
-    return all;
-  }
 
   healCategoryLayouts(big);
   // 分群：各 cat 一區，額外一個 "其他" 區（若有 small）
@@ -965,17 +937,20 @@ function animateNetWorth(to) {
 function renderLegend() {
   const box=document.getElementById("legend");
   box.innerHTML="";
+  const totalNW = netWorth();
   GROUP_ORDER.forEach(cat=>{
     const list=assets.filter(a=>a.cat===cat);
     if(!list.length) return;
     const gv=list.reduce((s,a)=>s+valueOf(a),0);
+    const pct = totalNW>0 ? (gv/totalNW*100) : 0;
+    const pctText = netWorthHidden ? "••%" : `${pct.toFixed(pct<10?1:0)}%`;
     const g=document.createElement("div"); g.className="legend-group";
     g.innerHTML=`<div class="legend-head">
       <span class="g-name-row">
         <button class="theme-dot" data-cat="${cat}" title="更換 ${CATEGORIES[cat].label} 主題色" style="background:${getPalette(cat)[0]}"></button>
         <span class="g-name">${CATEGORIES[cat].label}</span>
       </span>
-      <span class="g-val">${mnf(gv)}</span>
+      <span class="g-val">${mnf(gv)}<span class="g-pct">${pctText}</span></span>
     </div>`;
     g.querySelector(".theme-dot").addEventListener("click", ()=>openThemePicker(cat));
     const items=document.createElement("div"); items.className="legend-items";
@@ -1867,16 +1842,6 @@ document.getElementById("refreshBtn").onclick=()=>refreshPrices(false);
   svgEl.addEventListener("pointerup", () => { chartScrubbing = false; hideChartScrub(); });
   svgEl.addEventListener("pointercancel", () => { chartScrubbing = false; hideChartScrub(); });
 })();
-
-const freeModeBtn = document.getElementById("freeModeBtn");
-function updateFreeModeBtn() { freeModeBtn.classList.toggle("on", freeMode); }
-updateFreeModeBtn();
-freeModeBtn.onclick = () => {
-  freeMode = !freeMode;
-  try { localStorage.setItem("assel_freeMode", freeMode ? "1" : "0"); } catch(e) {}
-  updateFreeModeBtn();
-  renderAll();
-};
 
 // ── 即時價 ──
 // 幣價：CoinGecko 公開 API（免金鑰、直接回台幣、有開 CORS，前端可直接抓）
