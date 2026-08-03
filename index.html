@@ -976,13 +976,14 @@ let chartSeries = "total"; // "total" | "cash" | "crypto" | "stock_tw" | "stock_
 let lastChartLayout = null; // 記住上次渲染的座標換算方式，供手勢滑動查值用
 let chartScrubbing = false;
 
-// 把逐筆變動紀錄聚合成「近 24 個月，每月一個點」
-// 規則：每月取「當月最後一筆」的值；該月沒有變動就沿用前一個有資料的月份（forward-fill）
-//      24 個月內完全沒有任何歷史資料的月份，往前抓不到值時，用「當前值」墊底
+// 把逐筆變動紀錄聚合成「近幾週，每週一個點」
+// 規則：每格取「這格結算日當天(含)為止最後一筆」的值；沒有變動就沿用前一格（forward-fill）
 // histExtractor：從一筆歷史快照裡取出「這個系列」的值（沒有資料回傳 null，代表這個點跳過不用）
-// liveValueFn：算出「現在當下」這個系列的即時值，會在序列最後多補一個「今天」的點，
-//              不會蓋掉本週（週一為標籤）那格原本的歷史快照值，兩者分開顯示。
 // sourceHistory：資料來源陣列（可以是全域淨值歷史 history，也可以是單一資產的每週快照）
+// 週格線以「週五」為結算日對齊——因為 weekly-snapshot.js 的 cron 是每週五才寫入子資產快照，
+// 用週五當格線才會跟資料真正落地的日子對上，不會出現週一這種資料根本沒異動的日期。
+// 目前這一格（還沒到下一個週五、還在累積中）不做任何即時覆蓋，就是老實 forward-fill 到「現在」
+// 已經寫進去的真實資料，標籤顯示今天的日期；等到了下一個週五，才會真正定案往左推一格。
 
 // 圖表週期切換：「6個月」「1年」固定週數；「全部」依實際最早一筆資料動態算，
 // 資料還不夠久時至少顯示 26 週（避免「全部」模式在資料很少時看起來反而更短）。
@@ -1008,19 +1009,24 @@ function chartWeeksForMode(mode) {
 }
 
 // sourceHistory：資料來源陣列（可以是全域淨值歷史 history，也可以是單一資產的每週快照）
-function buildWeeklySeries(sourceHistory, histExtractor, liveValueFn) {
+function buildWeeklySeries(sourceHistory, histExtractor) {
   const CHART_WEEKS = chartWeeksForMode(chartRangeMode);
   const now = new Date();
-  // 找出「本週」的週一當基準（週日算前一週的最後一天），每週一格往前推 CHART_WEEKS 週
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const dow = today.getDay(); // 0=Sun...6=Sat
-  const daysSinceMonday = (dow === 0) ? 6 : dow - 1;
-  const thisMonday = new Date(today); thisMonday.setDate(today.getDate() - daysSinceMonday);
+  const dow = today.getDay(); // 0=Sun...6=Sat，5=五
+  // 找出「最近一個週五」（若今天本身就是週五，這裡就是今天）
+  const daysSinceFriday = (dow - 5 + 7) % 7;
+  const lastFriday = new Date(today); lastFriday.setDate(today.getDate() - daysSinceFriday);
 
   const weeks = [];
   for (let i = CHART_WEEKS - 1; i >= 0; i--) {
-    const weekStart = new Date(thisMonday); weekStart.setDate(thisMonday.getDate() - i*7);
-    weeks.push({ start: weekStart, label: `${weekStart.getMonth()+1}/${weekStart.getDate()}` });
+    const wkEnd = new Date(lastFriday); wkEnd.setDate(lastFriday.getDate() - i*7);
+    weeks.push({ end: wkEnd, label: `${wkEnd.getMonth()+1}/${wkEnd.getDate()}` });
+  }
+  // 今天還沒到本週的週五，就多補一格「還在累積中」的今天，用今天的日期當標籤。
+  // 如果今天剛好就是週五，最後一格（lastFriday）跟今天是同一天，不用重複多補。
+  if (today.getTime() !== lastFriday.getTime()) {
+    weeks.push({ end: today, label: `${today.getMonth()+1}/${today.getDate()}` });
   }
 
   const sorted = sourceHistory
@@ -1028,30 +1034,25 @@ function buildWeeklySeries(sourceHistory, histExtractor, liveValueFn) {
     .filter(h => h.v != null)
     .sort((a,b) => a.t - b.t);
   let idx = 0;
-  // 一開始是 null，代表「這一週完全沒有紀錄」——不會被誤填成第一筆資料的值、往回一路貼到最早的週。
+  // 一開始是 null，代表「這一格完全沒有紀錄」——不會被誤填成第一筆資料的值、往回一路貼到最早的格。
   // 只有真的碰到第一筆資料之後，才開始 forward-fill（沿用前一筆直到下一次變動）。
   let lastVal = null;
-  const series = weeks.map((wk, i) => {
-    const nextStart = i < weeks.length-1 ? weeks[i+1].start : new Date(wk.start.getTime()+7*24*3600*1000);
-    const weekEndTime = nextStart.getTime() - 1;
+  const series = weeks.map((wk) => {
+    const weekEndTime = new Date(wk.end.getFullYear(), wk.end.getMonth(), wk.end.getDate(), 23,59,59,999).getTime();
     while (idx < sorted.length && sorted[idx].t <= weekEndTime) {
       lastVal = sorted[idx].v;
       idx++;
     }
-    return { y:wk.start.getFullYear(), m:wk.start.getMonth(), label: wk.label, v: lastVal };
+    return { y: wk.end.getFullYear(), m: wk.end.getMonth(), label: wk.label, v: lastVal };
   });
-  // 本週（週一那格）維持它自己實際累積到的歷史值，不被即時值蓋掉。
-  // 另外多補一個「今天」的點掛在最尾端，永遠用即時值，讓線的終點還是能反映最新狀態。
-  series.push({ y: today.getFullYear(), m: today.getMonth(), label: `${today.getMonth()+1}/${today.getDate()}`, v: liveValueFn() });
   return series;
 }
 
-// 依目前選的系列，回傳 { histExtractor, liveValueFn, color, label }
+// 依目前選的系列，回傳 { histExtractor, color, label }
 function getChartSeriesConfig(key) {
   if (key === "total") {
     return {
       histExtractor: h => h.v,
-      liveValueFn: () => netWorth(),
       label: "總資產",
     };
   }
@@ -1059,7 +1060,6 @@ function getChartSeriesConfig(key) {
     // 分類的 histExtractor 直接讀 h.v：sourceHistory 這邊改由 buildCategoryHistory(key) 提供，
     // 已經把 net_worth_history.breakdown 跟 asset_snapshots 加總 fallback 合併好了。
     histExtractor: h => h.v,
-    liveValueFn: () => assets.filter(a=>a.cat===key).reduce((s,a)=>s+valueOf(a),0),
     label: CATEGORIES[key].label,
     color: getPalette(key)[2], // 用該分類色系中間深淺的一階，跟 treemap 方塊顏色呼應
   };
@@ -1141,22 +1141,22 @@ function renderChart() {
   let lines = []; // 統一格式：{ key, label, color, series, isMain }
   if (showAll) {
     lines.push({ key:"total", label:"總資產", color:TOTAL_COLOR,
-      series: buildWeeklySeries(history, h=>h.v, ()=>netWorth()), isMain:true });
+      series: buildWeeklySeries(history, h=>h.v), isMain:true });
     GROUP_ORDER.forEach(cat=>{
       const cfg = getChartSeriesConfig(cat);
       lines.push({ key:cat, label:cfg.label, color:cfg.color,
-        series: buildWeeklySeries(buildCategoryHistory(cat), cfg.histExtractor, cfg.liveValueFn), isMain:false });
+        series: buildWeeklySeries(buildCategoryHistory(cat), cfg.histExtractor), isMain:false });
     });
   } else {
     const cat = chartSeries;
     const cfg = getChartSeriesConfig(cat);
     lines.push({ key:cat, label:cfg.label, color:cfg.color,
-      series: buildWeeklySeries(buildCategoryHistory(cat), cfg.histExtractor, cfg.liveValueFn), isMain:true });
+      series: buildWeeklySeries(buildCategoryHistory(cat), cfg.histExtractor), isMain:true });
     // 子項目：這個分類底下「目前」每一個資產，各自的走勢（資料來源是每週快照 asset_snapshots）
     assets.filter(a=>a.cat===cat).forEach(a=>{
       const assetHist = assetSnapshotHistory[a.id] || [];
       lines.push({ key:"asset:"+a.id, label:a.name, color:a.color,
-        series: buildWeeklySeries(assetHist, h=>h.v, ()=>valueOf(a)), isMain:false });
+        series: buildWeeklySeries(assetHist, h=>h.v), isMain:false });
     });
   }
 
