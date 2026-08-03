@@ -50,6 +50,7 @@
   .eye-btn:active { transform: scale(.92); }
   .eye-btn.off { color: #3a3f4a; }
   .subline { font-size: 12px; color: #5b616e; margin-top: 4px; }
+  .nw-change { font-size: 12px; margin-top: 3px; font-variant-numeric: tabular-nums; }
   .price-status-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
   .price-status { font-size: 11px; color: #5b616e; }
   .refresh-btn { width: 24px; height: 24px; border-radius: 7px; border: 1px solid #23252e; background: #16181f; color: #8a94a6; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; }
@@ -131,6 +132,9 @@
   .chart-series-btn { border: 1.5px solid #23252e; background: #16181f; color: #8a94a6; border-radius: 20px; padding: 5px 12px; font-size: 11.5px; font-weight: 600; cursor: pointer; transition: all .12s; display: flex; align-items: center; gap: 5px; }
   .chart-series-btn .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .chart-series-btn.on { border-color: currentColor; }
+  .chart-period-row { display: flex; gap: 6px; margin-bottom: 10px; }
+  .chart-period-btn { border: none; background: transparent; color: #5b616e; font-size: 11px; font-weight: 600; cursor: pointer; padding: 3px 8px; border-radius: 12px; transition: all .12s; }
+  .chart-period-btn.on { color: #e8eaed; background: #20222b; }
   .chart-range { font-size: 11px; color: #5b616e; }
   #sparkline { width: 100%; height: 168px; display: block; touch-action: none; }
   .chart-tooltip {
@@ -174,6 +178,7 @@
   .sm-input { width: 100%; background: #0e0f13; border: 1.5px solid #2a2d38; border-radius: 11px; padding: 12px 14px; color: #fff; font-size: 16px; font-weight: 600; outline: none; font-variant-numeric: tabular-nums; }
   .row2 { display: flex; gap: 10px; }
   .note-sm { font-size: 11px; color: #5b616e; margin: 2px 0 8px; }
+  .warn-sm { font-size: 11px; color: #f16a6a; margin: 4px 0 0; }
   .expand-note { animation: fadeIn .3s ease; }
   .del-btn { width: 100%; border: 1.5px solid #3a2020; background: transparent; color: #d9645a; border-radius: 12px; padding: 12px 0; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 10px; }
 
@@ -196,6 +201,7 @@
         </button>
       </div>
       <div class="subline" id="subline"></div>
+      <div class="nw-change" id="nwChange"></div>
       <div class="price-status-row">
         <span class="price-status" id="priceStatus">—</span>
         <button class="refresh-btn" id="refreshBtn" title="更新即時價">
@@ -215,6 +221,7 @@
       <span class="chart-title">資產變化</span>
       <span class="chart-range" id="chartRange">近期</span>
     </div>
+    <div class="chart-period-row" id="chartPeriodRow"></div>
     <div class="chart-series-row" id="chartSeriesRow"></div>
     <div style="position:relative">
       <svg id="sparkline" viewBox="0 0 340 168" preserveAspectRatio="none"></svg>
@@ -976,11 +983,33 @@ let chartScrubbing = false;
 // liveValueFn：算出「現在當下」這個系列的即時值，會在序列最後多補一個「今天」的點，
 //              不會蓋掉本週（週一為標籤）那格原本的歷史快照值，兩者分開顯示。
 // sourceHistory：資料來源陣列（可以是全域淨值歷史 history，也可以是單一資產的每週快照）
-// 圖表要顯示幾週：資料還不多，先顯示 26 週，之後累積夠了可以改成 52（一年）或 104（兩年）
-const CHART_WEEKS = 26;
+
+// 圖表週期切換：「6個月」「1年」固定週數；「全部」依實際最早一筆資料動態算，
+// 資料還不夠久時至少顯示 26 週（避免「全部」模式在資料很少時看起來反而更短）。
+let chartRangeMode = "6m"; // "6m" | "1y" | "all"
+try { chartRangeMode = localStorage.getItem("assel_chartRange") || "6m"; } catch(e) {}
+
+function getEarliestDataTime() {
+  let earliest = null;
+  history.forEach(h => { if (earliest===null || h.t < earliest) earliest = h.t; });
+  Object.values(assetSnapshotHistory).forEach(arr => arr.forEach(p => { if (earliest===null || p.t < earliest) earliest = p.t; }));
+  return earliest;
+}
+
+function chartWeeksForMode(mode) {
+  if (mode === "1y") return 52;
+  if (mode === "all") {
+    const earliest = getEarliestDataTime();
+    if (earliest == null) return 26;
+    const weeksSince = Math.ceil((Date.now() - earliest) / (7*24*3600*1000)) + 1;
+    return Math.max(26, weeksSince);
+  }
+  return 26; // "6m"（預設）
+}
 
 // sourceHistory：資料來源陣列（可以是全域淨值歷史 history，也可以是單一資產的每週快照）
 function buildWeeklySeries(sourceHistory, histExtractor, liveValueFn) {
+  const CHART_WEEKS = chartWeeksForMode(chartRangeMode);
   const now = new Date();
   // 找出「本週」的週一當基準（週日算前一週的最後一天），每週一格往前推 CHART_WEEKS 週
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -1067,6 +1096,21 @@ function formatAxisNum(v) {
 function renderChart() {
   const svg=document.getElementById("sparkline");
   const seriesRow=document.getElementById("chartSeriesRow");
+  const periodRow=document.getElementById("chartPeriodRow");
+
+  // 渲染週期切換按鈕（6個月／1年／全部）
+  const PERIOD_OPTIONS = [ ["6m","6個月"], ["1y","1年"], ["all","全部"] ];
+  periodRow.innerHTML = PERIOD_OPTIONS.map(([key,label])=>{
+    const on = chartRangeMode===key;
+    return `<button class="chart-period-btn ${on?'on':''}" data-period="${key}">${label}</button>`;
+  }).join("");
+  periodRow.querySelectorAll(".chart-period-btn").forEach(btn=>{
+    btn.onclick=()=>{
+      chartRangeMode=btn.dataset.period;
+      try { localStorage.setItem("assel_chartRange", chartRangeMode); } catch(e) {}
+      renderChart();
+    };
+  });
 
   // 渲染切換按鈕（總資產 + 4 個大分類），只在還沒建立過、或資產類別組成變化時重繪按鈕本身
   const TOTAL_COLOR = "#e8eaed";
@@ -1287,6 +1331,36 @@ async function commitTransfer(fromAsset, toAsset) {
   renderAll();
 }
 
+// ── 淨值變化指標：跟過去某個時間點（優先抓 7 天前）比較漲跌 ──
+// 資料不夠久（例如剛開始蒐集歷史）時，不硬凹說「較上週」，改成老實顯示「較 X 天前」。
+function renderNetWorthChange() {
+  const el = document.getElementById("nwChange");
+  if (!el) return;
+  if (!history.length) { el.innerHTML = ""; return; }
+  const now = Date.now();
+  const targetT = now - 7*24*3600*1000;
+  let ref = null;
+  history.forEach(h => { if (h.t <= targetT && (!ref || h.t > ref.t)) ref = h; });
+  let usedDays = 7;
+  if (!ref) {
+    ref = history.reduce((a,b)=> a.t < b.t ? a : b);
+    usedDays = Math.max(1, Math.round((now - ref.t)/(24*3600*1000)));
+    if (ref.t >= now - 12*3600*1000) { el.innerHTML = ""; return; } // 唯一一筆資料就是現在，還沒有可比較的過去，先不顯示
+  }
+  const refVal = ref.v;
+  const cur = netWorth();
+  if (!(refVal > 0)) { el.innerHTML = ""; return; }
+  const diff = cur - refVal;
+  const pct = diff/refVal*100;
+  const up = diff >= 0;
+  const arrow = up ? "▲" : "▼";
+  const color = up ? "#3ecf8e" : "#f16a6a";
+  const label = usedDays===7 ? "較上週" : `較${usedDays}天前`;
+  const pctText = `${up?"+":""}${pct.toFixed(1)}%`;
+  const diffText = netWorthHidden ? "" : ` (${up?"+":""}${nf(diff)})`;
+  el.innerHTML = `<span style="color:${color}">${arrow} ${pctText}</span><span style="color:#5b616e">${diffText} ${label}</span>`;
+}
+
 // ── 全部重繪 ──
 function renderAll(animate=true) {
   renderTreemap(); renderLegend(); renderChart();
@@ -1294,6 +1368,7 @@ function renderAll(animate=true) {
   if(animate) animateNetWorth(nw);
   else { document.getElementById("networth").textContent = netWorthHidden ? "•••••••" : nf(nw); animatedNW=nw; }
   document.getElementById("subline").textContent = `${assets.length} 項資產`;
+  renderNetWorthChange();
 }
 
 // ── 底部面板通用 ──
@@ -1372,6 +1447,7 @@ function openAdjust(id) {
       <div class="field">
         <div class="field-label">從「${a.name}」扣除（${isCash?"金額":unit}）</div>
         <input class="sm-input" id="tFrom" type="number" inputmode="${(isCash||qtyIsWhole)?"numeric":"decimal"}" step="${(isCash||qtyIsWhole)?"1":"any"}" placeholder="0">
+        <div class="warn-sm" id="tFromWarn" style="display:none">餘額不足，目前剩 ${isCash?mnf(a.balance||0):`${a.qty||0}${unit}`}——還是可以送出，超出的部分會扣成 0</div>
       </div>
       <div class="field" id="tToField" style="display:none">
         <div class="field-label" id="tToLabel">轉入數量</div>
@@ -1446,7 +1522,13 @@ function openAdjust(id) {
   function checkTransferReady(){
     transferBtn.disabled = !(transferTarget && tFrom.value && Number(tFrom.value)>0 && tTo.value && Number(tTo.value)>0);
   }
-  tFrom.oninput=()=>{ if(isCash||qtyIsWhole) tFrom.value=tFrom.value.replace(/[^\d]/g,""); checkTransferReady(); };
+  const tFromWarn = sheet.querySelector("#tFromWarn");
+  const available = isCash ? (a.balance||0) : (a.qty||0);
+  function checkFromBalance(){
+    const v = Number(tFrom.value);
+    tFromWarn.style.display = (v>0 && v>available) ? "block" : "none";
+  }
+  tFrom.oninput=()=>{ if(isCash||qtyIsWhole) tFrom.value=tFrom.value.replace(/[^\d]/g,""); checkTransferReady(); checkFromBalance(); };
   tTo.oninput=()=>{ if(transferTarget && (transferTarget.cat==="cash"||isWholeShareCat(transferTarget.cat))) tTo.value=tTo.value.replace(/[^\d]/g,""); checkTransferReady(); };
 
   transferBtn.onclick=async ()=>{
