@@ -6,9 +6,17 @@
 //    至少每週都會穩定多一個點，不會完全被使用頻率綁死。
 // 排程設定在根目錄的 vercel.json。
 //
+// ⚠️ 重要（2026/08 修正）：以前這支直接拿 assets.price 當市價算 value，
+// 但 assets.price 只有使用者「手動編輯資產」時才會更新——前端每次開 App 抓到的即時價
+// 只存在瀏覽器記憶體、不會寫回資料庫。結果就是快照寫進去的是一個過期好幾個月的價格，
+// 圖表上個別資產（比特幣、0050、GOOG…）的走勢線會完全不動，看起來像壞掉。
+// 現在改成：先抓即時價 → 用即時價算 value → 順手把即時價寫回 assets.price。
+//
 // 需要在 Vercel 專案設定 → Environment Variables 加兩個變數（跟其他 API 共用同一組）：
 //   SUPABASE_URL      例：https://xxxxx.supabase.co
 //   SUPABASE_ANON_KEY 例：eyJhbGci....
+
+import { fetchLivePrices, valueOfAsset, getBaseUrl, writeBackPrices } from "./live-prices.js";
 
 export default async function handler(req, res) {
   // trim() 防呆：環境變數複製貼上很容易不小心夾帶結尾換行或空白字元，
@@ -53,11 +61,24 @@ export default async function handler(req, res) {
     }
     const assetList = await assetsRes.json();
 
-    const valueOf = a => a.cat === "cash" ? Number(a.balance || 0) : Number(a.qty || 0) * Number(a.price || 0);
+    // ── 抓即時價（這是這支程式正確性的關鍵，不能省） ──
+    // 抓不到的資產，valueOfAsset() 會自動退回用 assets.price，不會整批失敗。
+    const baseUrl = getBaseUrl(req);
+    let livePrices = {};
+    try {
+      livePrices = await fetchLivePrices(assetList, { baseUrl });
+    } catch (e) {
+      console.warn("即時價抓取失敗，這次快照改用資料庫既有價格:", e.message);
+    }
+    // 有幾筆是真的用到即時價的，回傳結果裡帶出來，方便之後排查
+    const pricedCount = Object.keys(livePrices).length;
 
     const rows = assetList.map(a => ({
       asset_id: a.id, name: a.name, cat: a.cat,
-      value: valueOf(a), qty: a.qty ?? null, price: a.price ?? null,
+      value: valueOfAsset(a, livePrices),
+      qty: a.qty ?? null,
+      // price 也存即時價（抓不到才退回原本的），這樣歷史快照自己就能還原當時的單價
+      price: a.cat === "cash" ? null : (livePrices[a.id] ?? a.price ?? null),
       snapshot_date: todayStr,
     }));
 
@@ -72,7 +93,7 @@ export default async function handler(req, res) {
     const CATS = ["cash", "crypto", "stock_tw", "stock_us"];
     const breakdown = {};
     CATS.forEach(cat => {
-      breakdown[cat] = assetList.filter(a => a.cat === cat).reduce((s,a) => s + valueOf(a), 0);
+      breakdown[cat] = assetList.filter(a => a.cat === cat).reduce((s,a) => s + valueOfAsset(a, livePrices), 0);
     });
     const totalValue = Object.values(breakdown).reduce((s,v) => s+v, 0);
     const nwRes = await fetch(`${SUPABASE_URL}/rest/v1/net_worth_history`, {
@@ -80,7 +101,13 @@ export default async function handler(req, res) {
     });
     if (!nwRes.ok) console.warn("補記分類明細快照失敗（不影響資產快照本身）:", nwRes.status);
 
-    return res.status(200).json({ ok: true, recorded: rows.length, date: todayStr });
+    // 順手把即時價寫回 assets.price，讓資料庫的價格不再長期過期（失敗不影響上面已完成的快照）
+    const pricesWritten = await writeBackPrices(livePrices, { supabaseUrl: SUPABASE_URL, headers });
+
+    return res.status(200).json({
+      ok: true, recorded: rows.length, date: todayStr,
+      livePriced: pricedCount, pricesWrittenBack: pricesWritten,
+    });
   } catch (e) {
     return res.status(502).json({ error: "執行失敗", detail: e.message });
   }
