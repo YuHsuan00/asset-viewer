@@ -1289,7 +1289,7 @@ function hideChartScrub() {
   if (tip) tip.style.display = "none";
 }
 
-function updateChartScrub(clientX) {
+function updateChartScrub(clientX, clientY) {
   if (!lastChartLayout) return;
   const svgEl = document.getElementById("sparkline");
   const rect = svgEl.getBoundingClientRect();
@@ -1332,6 +1332,16 @@ function updateChartScrub(clientX) {
     const tipW = 130;
     let leftPct = (x/W)*100;
     tip.style.left = `clamp(4px, calc(${leftPct}% - ${tipW/2}px), calc(100% - ${tipW+4}px))`;
+    // 上下位置：躲開手指目前實際按著的地方——手指按在上半部，字卡就貼底部；按在下半部，字卡就貼頂部。
+    // 這樣手指本身（不只是字卡）就不會剛好蓋住自己叫出來的數字。
+    const relY = clientY!=null ? (clientY - rect.top) / rect.height : 0;
+    if (relY < 0.5) {
+      tip.style.top = "auto";
+      tip.style.bottom = "4px";
+    } else {
+      tip.style.top = "4px";
+      tip.style.bottom = "auto";
+    }
   }
 }
 
@@ -1955,9 +1965,9 @@ document.getElementById("refreshBtn").onclick=()=>refreshPrices(false);
   svgEl.addEventListener("pointerdown", (e) => {
     chartScrubbing = true;
     try { svgEl.setPointerCapture(e.pointerId); } catch(err) {}
-    updateChartScrub(e.clientX);
+    updateChartScrub(e.clientX, e.clientY);
   });
-  svgEl.addEventListener("pointermove", (e) => { if (chartScrubbing) updateChartScrub(e.clientX); });
+  svgEl.addEventListener("pointermove", (e) => { if (chartScrubbing) updateChartScrub(e.clientX, e.clientY); });
   svgEl.addEventListener("pointerup", () => { chartScrubbing = false; hideChartScrub(); });
   svgEl.addEventListener("pointercancel", () => { chartScrubbing = false; hideChartScrub(); });
 })();
