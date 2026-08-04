@@ -1328,19 +1328,18 @@ function updateChartScrub(clientX, clientY) {
     }).join("");
     tip.innerHTML = `<div style="font-size:10px;color:#5b616e;margin-bottom:3px">${labelSeries[idx].label}</div>${rows}`;
     tip.style.display = "block";
-    // 讓 tooltip 跟著手指左右移動，但不超出圖表卡片邊界
-    const tipW = 130;
-    let leftPct = (x/W)*100;
-    tip.style.left = `clamp(4px, calc(${leftPct}% - ${tipW/2}px), calc(100% - ${tipW+4}px))`;
-    // 上下位置：躲開手指目前實際按著的地方——手指按在上半部，字卡就貼底部；按在下半部，字卡就貼頂部。
-    // 這樣手指本身（不只是字卡）就不會剛好蓋住自己叫出來的數字。
-    const relY = clientY!=null ? (clientY - rect.top) / rect.height : 0;
-    if (relY < 0.5) {
-      tip.style.top = "auto";
-      tip.style.bottom = "4px";
+    // 位置：躲開手指按著的地方。圖表高度才 168，上下閃避讓不開（手指比那個高度還粗），
+    // 所以改成左右閃避——手指在左半邊，卡片就整個靠右；手指在右半邊，卡片就整個靠左。
+    // 卡片不跟著手指左右移動，固定貼在對側邊緣，這樣手指怎麼滑都不會蓋到數字。
+    tip.style.top = "4px";
+    tip.style.bottom = "auto";
+    const relX01 = (clientX - rect.left) / rect.width;
+    if (relX01 < 0.5) {
+      tip.style.left = "auto";
+      tip.style.right = "4px";
     } else {
-      tip.style.top = "4px";
-      tip.style.bottom = "auto";
+      tip.style.left = "4px";
+      tip.style.right = "auto";
     }
   }
 }
