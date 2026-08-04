@@ -1093,6 +1093,17 @@ function formatAxisNum(v) {
   return Math.round(v).toString();
 }
 
+// 算某條線「現在當下」的即時值，只用來畫圖表尾端的即時參考標記，不會寫回任何歷史資料，
+// 也不會混進 buildWeeklySeries 的線本身——線永遠只呈現已經寫進資料庫的真實紀錄。
+function getLiveValueForKey(key) {
+  if (key === "total") return netWorth();
+  if (key.startsWith("asset:")) {
+    const a = assets.find(x => x.id === key.slice(6));
+    return a ? valueOf(a) : null;
+  }
+  return assets.filter(a=>a.cat===key).reduce((s,a)=>s+valueOf(a),0);
+}
+
 function renderChart() {
   const svg=document.getElementById("sparkline");
   const seriesRow=document.getElementById("chartSeriesRow");
@@ -1159,6 +1170,7 @@ function renderChart() {
         series: buildWeeklySeries(assetHist, h=>h.v), isMain:false });
     });
   }
+  lines.forEach(ln => { ln.live = getLiveValueForKey(ln.key); });
 
   const n = lines[0].series.length;
 
@@ -1174,13 +1186,17 @@ function renderChart() {
   }
 
   const W=340, H=168;
-  const padL=42, padR=10, padT=14, padB=22;
+  const padL=42, padR=30, padT=14, padB=22; // padR 加寬一點，右邊留給「即時」標記的空間
   const plotW=W-padL-padR, plotH=H-padT-padB;
 
   // Y 軸固定從 0 開始（不是用這條線自己的 min~max），這樣「完全沒有變化的平線」也會停在
-  // 該有的高度，不會因為 max===min 被誤判成貼底。只看有資料(非null)的月份算最大值。
+  // 該有的高度，不會因為 max===min 被誤判成貼底。只看有資料(非null)的月份算最大值，
+  // 也把「即時」標記的值算進去，不然即時價格比歷史紀錄高的時候，標記會被切到圖表外面。
   let maxVal = 0;
-  lines.forEach(ln => { ln.series.forEach(pt => { if (pt.v!=null && pt.v > maxVal) maxVal = pt.v; }); });
+  lines.forEach(ln => {
+    ln.series.forEach(pt => { if (pt.v!=null && pt.v > maxVal) maxVal = pt.v; });
+    if (ln.live!=null && ln.live > maxVal) maxVal = ln.live;
+  });
   if (maxVal <= 0) maxVal = 1;
   const yMax = maxVal * 1.12; // 留一點頭部空間，最高點不會頂到圖表邊緣
 
@@ -1211,12 +1227,21 @@ function renderChart() {
   lines.forEach(ln=>{
     const s = ln.series;
     const firstIdx = s.findIndex(pt => pt.v != null);
-    if (firstIdx === -1) return; // 完全沒有任何資料，這條線整個跳過不畫
+    const col = ln.color;
+    const opacity = ln.isMain ? 1 : 0.5;
+    if (firstIdx === -1) {
+      // 完全沒有任何歷史紀錄（例如剛新增、還沒被週五快照收錄過的資產）：
+      // 沒有線可畫，但至少把「即時」空心點單獨標出來，不要整條線憑空消失。
+      if (ln.live != null) {
+        const liveX = W - padR + 16, liveY = yAt(ln.live);
+        linesSvg += `<circle cx="${liveX.toFixed(1)}" cy="${liveY.toFixed(1)}" r="${ln.isMain?3.5:2.2}" fill="#0b0c10" stroke="${col}" stroke-width="1.5" stroke-opacity="${opacity}"/>`;
+        if (ln.isMain) linesSvg += `<text x="${liveX.toFixed(1)}" y="${(padT-4).toFixed(1)}" fill="${col}" fill-opacity="${opacity}" font-size="8" font-weight="700" text-anchor="middle">即時</text>`;
+      }
+      return;
+    }
     const validPts = [];
     for (let i=firstIdx; i<n; i++) { if (s[i].v!=null) validPts.push([xAt(i), yAt(s[i].v)]); }
-    const col = ln.color;
     const last = validPts[validPts.length-1];
-    const opacity = ln.isMain ? 1 : 0.5;
     if (validPts.length >= 2) {
       // 有兩個點以上，可以連成線
       const line = smoothPath(validPts);
@@ -1234,6 +1259,18 @@ function renderChart() {
     // 不管有沒有連成線，只要有資料（哪怕只有本週這一個點），都要畫出最後一個點的圓點，
     // 不然資料還很少的時候（例如剛開始蒐集），本週的點會完全看不到，像是壞掉一樣。
     linesSvg += `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="${ln.isMain?4:2.5}" fill="${col}" fill-opacity="${opacity}"/>`;
+
+    // 「即時」標記：跟上面歷史線分開畫。虛線接到現在的即時值，空心點（不是實心），
+    // 一眼就能看出這不是正式記錄，只是現在當下的參考值，不會跟真正的歷史資料混在一起。
+    if (ln.live != null) {
+      const liveX = W - padR + 16;
+      const liveY = yAt(ln.live);
+      linesSvg += `<line x1="${last[0].toFixed(1)}" y1="${last[1].toFixed(1)}" x2="${liveX.toFixed(1)}" y2="${liveY.toFixed(1)}" stroke="${col}" stroke-width="1.25" stroke-dasharray="2.5,2.5" stroke-opacity="${opacity*0.85}"/>`;
+      linesSvg += `<circle cx="${liveX.toFixed(1)}" cy="${liveY.toFixed(1)}" r="${ln.isMain?3.5:2.2}" fill="#0b0c10" stroke="${col}" stroke-width="1.5" stroke-opacity="${opacity}"/>`;
+      if (ln.isMain) {
+        linesSvg += `<text x="${liveX.toFixed(1)}" y="${(padT-4).toFixed(1)}" fill="${col}" fill-opacity="${opacity}" font-size="8" font-weight="700" text-anchor="middle">即時</text>`;
+      }
+    }
   });
 
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
@@ -2053,6 +2090,28 @@ async function fetchUSStockPrices() {
   return { ok, fail, err };
 }
 
+// 把剛抓到的即時價寫回 Supabase 的 assets.price。
+// 為什麼需要：assets.price 以前只有「手動編輯資產」時才會更新，前端抓到的即時價只活在記憶體裡，
+// 導致伺服器端的 Cron（週快照、定期定額）永遠只讀得到一個過期好幾個月的價格。
+// 節流：同一個價格沒必要每次刷新都寫一次，設一個最短間隔，避免產生大量沒意義的寫入。
+const PRICE_WRITEBACK_MIN_INTERVAL = 30 * 60 * 1000; // 30 分鐘
+let lastPriceWriteback = 0;
+async function writeBackPricesToCloud(force=false) {
+  if (!cloudOn()) return;
+  const now = Date.now();
+  if (!force && now - lastPriceWriteback < PRICE_WRITEBACK_MIN_INTERVAL) return;
+  lastPriceWriteback = now;
+  const priced = assets.filter(a => a.cat !== "cash" && Number(a.price) > 0);
+  if (!priced.length) return;
+  try {
+    await Promise.all(priced.map(a =>
+      sb.from("assets").update({ price: a.price }).eq("id", a.id)
+    ));
+  } catch (e) {
+    console.warn("即時價寫回雲端失敗（不影響畫面顯示）:", e.message);
+  }
+}
+
 let refreshing = false;
 async function refreshPrices(silent=false) {
   if (refreshing) return;
@@ -2063,6 +2122,9 @@ async function refreshPrices(silent=false) {
   if (status && !silent) status.textContent = "更新價格中…";
 
   const [c, tw, us] = await Promise.all([fetchCryptoPrices(), fetchTWStockPrices(), fetchUSStockPrices()]);
+
+  // 抓到新價格就順手寫回雲端（手動按重新整理時強制寫，自動背景刷新則走節流）
+  if (c.ok + tw.ok + us.ok > 0) writeBackPricesToCloud(!silent);
 
   if (btn) btn.classList.remove("spinning");
   const now = new Date();
