@@ -263,6 +263,23 @@ const CATEGORIES = {
 // 取得某類別目前主題的調色盤（6 階色階陣列）
 function getPalette(cat) { return THEMES[CATEGORIES[cat]?.theme || "green"].shades; }
 
+// 銀行帳戶可選的幣別。新帳戶預設台幣；資料庫裡沒填 currency 的舊資料一律視為台幣（見 currencyOf）。
+const CURRENCIES = {
+  TWD: { label: "台幣", symbol: "NT$", quick: [1000,5000,10000,50000] },
+  USD: { label: "美元", symbol: "US$", quick: [50,100,500,1000] },
+  JPY: { label: "日圓", symbol: "¥",   quick: [5000,10000,50000,100000] },
+  CNY: { label: "人民幣", symbol: "¥", quick: [200,500,1000,5000] },
+  EUR: { label: "歐元", symbol: "€",   quick: [50,100,500,1000] },
+  HKD: { label: "港幣", symbol: "HK$", quick: [500,1000,5000,10000] },
+  GBP: { label: "英鎊", symbol: "£",   quick: [50,100,500,1000] },
+  AUD: { label: "澳幣", symbol: "A$",  quick: [50,100,500,1000] },
+};
+function currencyOf(a) { return a.currency || "TWD"; }
+// 匯率快取：{ 幣別代碼: 1單位換算成多少台幣 }，由 fetchFxRates() 定期更新（見即時價那段）。
+// 抓不到即時匯率時先用這組保底值墊著，不會讓外幣帳戶的淨值整個算不出來。
+let fxRates = { TWD:1, USD:32, JPY:0.21, CNY:4.5, EUR:35, HKD:4.1, GBP:41, AUD:21 };
+function fxRateOf(cur) { return fxRates[cur] ?? 1; }
+
 // 台股、美股都只能持有整數股（不像加密貨幣可以有小數顆），這裡統一判斷（roundQty 實際捨去邏輯見下方既有函式）
 function isWholeShareCat(cat) { return cat === "stock_tw" || cat === "stock_us"; }
 
@@ -562,8 +579,13 @@ function textWidth(text, weight, size) {
   _measureCtx.font = `${weight} ${size}px -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", sans-serif`;
   return _measureCtx.measureText(text).width;
 }
-const valueOf = a => a.cat === "cash" ? a.balance : a.qty * a.price;
+// 現金：balance 是「原幣別金額」，換算成台幣要乘匯率（台幣本身匯率=1，不受即時匯率抓取失敗影響）
+// 其他類別：本來就是台幣計價的 qty × price
+const valueOf = a => a.cat === "cash" ? (Number(a.balance||0) * fxRateOf(currencyOf(a))) : a.qty * a.price;
 const netWorth = () => assets.reduce((s,a)=>s+valueOf(a),0);
+// 「1 單位這個資產值多少台幣」：轉出/定期定額換算數量都靠這個。
+// 現金以前固定回傳 1（假設一定是台幣），現在改成該幣別的匯率——外幣帳戶 1 單位不等於 1 台幣。
+const unitPriceOf = a => a.cat === "cash" ? fxRateOf(currencyOf(a)) : Number(a.price||0);
 
 // ── squarified treemap ──
 // preserveOrder=true 時不依數值重新排序，改用呼叫端給的順序（讓手動拖曳排序生效）
@@ -963,7 +985,13 @@ function renderLegend() {
     const items=document.createElement("div"); items.className="legend-items";
     list.forEach(a=>{
       const it=document.createElement("div"); it.className="legend-item";
-      it.innerHTML=`<span class="swatch" style="background:${a.color}"></span><span class="li-name">${a.name}</span>${a.cat!=="cash"?`<span class="li-qty">${a.qty}${CATEGORIES[a.cat].unit}</span>`:""}`;
+      let extra = "";
+      if (a.cat==="cash") {
+        if (currencyOf(a)!=="TWD") extra = `<span class="li-qty">${CURRENCIES[currencyOf(a)].symbol}${netWorthHidden?"•••":nf(a.balance)}</span>`;
+      } else {
+        extra = `<span class="li-qty">${a.qty}${CATEGORIES[a.cat].unit}</span>`;
+      }
+      it.innerHTML=`<span class="swatch" style="background:${a.color}"></span><span class="li-name">${a.name}</span>${extra}`;
       it.addEventListener("click",()=>openAdjust(a.id));
       items.appendChild(it);
     });
@@ -1433,13 +1461,19 @@ function openAdjust(id) {
   const a=assets.find(x=>x.id===id); if(!a) return;
   const isCash=a.cat==="cash";
   const unit=CATEGORIES[a.cat].unit;
-  const sub = isCash?`目前 ${mnf(a.balance)}`:`持有 ${a.qty} ${unit} · ${mnf(valueOf(a))}`;
+  const sub = isCash
+    ? (currencyOf(a)==="TWD" ? `目前 ${mnf(a.balance)}` : `目前 ${CURRENCIES[currencyOf(a)].symbol}${netWorthHidden?"•••••":nf(a.balance)}（≈ ${mnf(valueOf(a))}）`)
+    : `持有 ${a.qty} ${unit} · ${mnf(valueOf(a))}`;
   let dir="add";
   const qtyIsWhole = isWholeShareCat(a.cat);
 
   const editFields = isCash
-    ? `<div class="field"><div class="field-label">餘額</div>
-         <input class="sm-input" id="eBal" type="number" inputmode="numeric" value="${a.balance}"></div>`
+    ? `<div class="row2">
+         <div class="field" style="flex:1"><div class="field-label">幣別</div>
+           <select class="sm-input" id="eCur">${Object.entries(CURRENCIES).map(([code,c])=>`<option value="${code}" ${code===currencyOf(a)?"selected":""}>${c.label}（${code}）</option>`).join("")}</select></div>
+         <div class="field" style="flex:1"><div class="field-label">餘額</div>
+           <input class="sm-input" id="eBal" type="number" inputmode="numeric" value="${a.balance}"></div>
+       </div>`
     : `<div class="field"><div class="field-label">代號</div>
          <input class="sm-input" id="eSym" value="${a.symbol||""}"></div>
        <div class="row2">
@@ -1467,8 +1501,8 @@ function openAdjust(id) {
         <button class="dir-btn sub" id="dSub">－ 減少</button>
       </div>
       <input class="big-input" id="amt" type="number" inputmode="${(isCash||qtyIsWhole)?"numeric":"decimal"}" step="${(isCash||qtyIsWhole)?"1":"any"}"
-        placeholder="${isCash?"輸入金額":"輸入數量（"+unit+"）"}" style="border:1.5px solid ${a.color}66">
-      ${isCash?`<div class="quick-row">${[1000,5000,10000,50000].map(q=>`<button class="quick-btn" data-q="${q}">${q/1000}k</button>`).join("")}</div>`:""}
+        placeholder="${isCash?`輸入金額（${CURRENCIES[currencyOf(a)].symbol}）`:"輸入數量（"+unit+"）"}" style="border:1.5px solid ${a.color}66">
+      ${isCash?`<div class="quick-row">${CURRENCIES[currencyOf(a)].quick.map(q=>`<button class="quick-btn" data-q="${q}">${q>=1000?(q/1000)+"k":q}</button>`).join("")}</div>`:""}
       <button class="primary-btn" id="applyBtn" disabled style="background:${a.color};color:#fff">確認</button>
     </div>
 
@@ -1491,9 +1525,9 @@ function openAdjust(id) {
         ${assets.length<=1?`<div class="note-sm">還沒有其他資產可以轉入，先新增一個吧</div>`:""}
       </div>
       <div class="field">
-        <div class="field-label">從「${a.name}」扣除（${isCash?"金額":unit}）</div>
+        <div class="field-label">從「${a.name}」扣除（${isCash?CURRENCIES[currencyOf(a)].label:unit}）</div>
         <input class="sm-input" id="tFrom" type="number" inputmode="${(isCash||qtyIsWhole)?"numeric":"decimal"}" step="${(isCash||qtyIsWhole)?"1":"any"}" placeholder="0">
-        <div class="warn-sm" id="tFromWarn" style="display:none">餘額不足，目前剩 ${isCash?mnf(a.balance||0):`${a.qty||0}${unit}`}——還是可以送出，超出的部分會扣成 0</div>
+        <div class="warn-sm" id="tFromWarn" style="display:none">餘額不足，目前剩 ${isCash?`${CURRENCIES[currencyOf(a)].symbol}${netWorthHidden?"•••••":nf(a.balance||0)}`:`${a.qty||0}${unit}`}——還是可以送出，超出的部分會扣成 0</div>
       </div>
       <div class="field" id="tToField" style="display:none">
         <div class="field-label" id="tToLabel">轉入數量</div>
@@ -1556,7 +1590,7 @@ function openAdjust(id) {
       btn.style.color = "#fff";
       const otherIsCash = other.cat==="cash";
       const otherIsWhole = isWholeShareCat(other.cat);
-      const otherUnit = otherIsCash ? "金額" : CATEGORIES[other.cat].unit;
+      const otherUnit = otherIsCash ? CURRENCIES[currencyOf(other)].label : CATEGORIES[other.cat].unit;
       tToLabel.textContent = `轉入「${other.name}」數量（${otherUnit}${otherIsWhole?"，整股":""}）`;
       tTo.setAttribute("inputmode", (otherIsCash||otherIsWhole) ? "numeric" : "decimal");
       tToField.style.display = "block";
@@ -1616,6 +1650,8 @@ function openAdjust(id) {
     if(isCash){
       const b=sheet.querySelector("#eBal").value;
       if(b!=="") a.balance=Math.max(0,Number(b));
+      const cur=sheet.querySelector("#eCur").value;
+      if(cur) a.currency=cur;
     } else {
       const sym=sheet.querySelector("#eSym").value.trim();
       const q=sheet.querySelector("#eQty").value;
@@ -1727,7 +1763,9 @@ function openAdd() {
       <div class="field"><div class="field-label">名稱</div>
         <input class="sm-input" id="fName" placeholder="${namePh}"></div>
       ${cat==="cash"
-        ? `<div class="field"><div class="field-label">初始金額</div><input class="sm-input" id="fBal" type="number" inputmode="numeric" placeholder="0"></div>`
+        ? `<div class="field"><div class="field-label">幣別</div>
+             <select class="sm-input" id="fCur">${Object.entries(CURRENCIES).map(([code,c])=>`<option value="${code}" ${code==="TWD"?"selected":""}>${c.label}（${code}）</option>`).join("")}</select></div>
+           <div class="field"><div class="field-label">初始金額</div><input class="sm-input" id="fBal" type="number" inputmode="numeric" placeholder="0"></div>`
         : `<div class="field"><div class="field-label">代號</div><input class="sm-input" id="fSym" placeholder="${symPh}"></div>
            <div class="row2">
              <div class="field" style="flex:1"><div class="field-label">${c.qtyLabel}${qtyIsWhole?"（整股）":""}</div><input class="sm-input" id="fQty" type="number" inputmode="${qtyIsWhole?"numeric":"decimal"}" ${qtyIsWhole?"":'step="any"'} placeholder="${qtyPh}"></div>
@@ -1759,7 +1797,7 @@ function openAdd() {
       const sameCat = assets.filter(a=>a.cat===cat);
       const nextOrder = sameCat.length ? Math.max(...sameCat.map(a=>a.order??0)) + 1 : 0;
       if(cat==="cash"){
-        assets.push({id,cat,name:nameEl.value.trim(),color,order:nextOrder,balance:Number(fields.querySelector("#fBal").value)});
+        assets.push({id,cat,name:nameEl.value.trim(),color,order:nextOrder,balance:Number(fields.querySelector("#fBal").value),currency:fields.querySelector("#fCur").value});
       } else {
         assets.push({id,cat,name:nameEl.value.trim(),color,order:nextOrder,
           symbol:(fields.querySelector("#fSym").value||nameEl.value).trim(),
@@ -1880,14 +1918,14 @@ function openAdd() {
       if (!selFrom || !selTo || !ruleAmt.value) { ruleEstimate.textContent=""; return; }
       const amt = Number(ruleAmt.value);
       if (!amt || amt<=0) { ruleEstimate.textContent=""; return; }
-      const fromUnitPrice = selFrom.cat==="cash" ? 1 : selFrom.price;
-      const toUnitPrice = selTo.cat==="cash" ? 1 : selTo.price;
+      const fromUnitPrice = unitPriceOf(selFrom);
+      const toUnitPrice = unitPriceOf(selTo);
       if (!fromUnitPrice || !toUnitPrice) {
         ruleEstimate.textContent = "＊來源或目標還沒有即時價格，暫時無法預覽換算數量";
         return;
       }
-      const fromUnit = selFrom.cat==="cash" ? "元" : CATEGORIES[selFrom.cat].unit;
-      const toUnit = selTo.cat==="cash" ? "元" : CATEGORIES[selTo.cat].unit;
+      const fromUnit = selFrom.cat==="cash" ? CURRENCIES[currencyOf(selFrom)].label : CATEGORIES[selFrom.cat].unit;
+      const toUnit = selTo.cat==="cash" ? CURRENCIES[currencyOf(selTo)].label : CATEGORIES[selTo.cat].unit;
       let toQty = amt/toUnitPrice;
       if (isWholeShareCat(selTo.cat)) toQty = Math.floor(toQty); // 股票只能整股，多的錢不扣
       const actualValue = toQty * toUnitPrice;
@@ -2050,6 +2088,31 @@ async function getUsdTwdRate() {
   return 32;
 }
 
+// 銀行帳戶多幣別支援：一樣借用 USDT 報價，一次 API 呼叫拿到所有幣別對美元的價格，
+// 換算出「各幣別對台幣」的匯率，更新全域 fxRates 快取。抓不到就維持上次（或保底）的值，
+// 不會讓外幣帳戶突然整個算不出淨值。只有真的有現金資產時才呼叫，省一次不必要的請求。
+async function fetchFxRates() {
+  if (!assets.some(a => a.cat === "cash")) return { ok:0, fail:0 };
+  const codes = Object.keys(CURRENCIES).filter(c => c !== "TWD").map(c=>c.toLowerCase());
+  try {
+    const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=twd,${codes.join(",")}`);
+    if (!r.ok) throw new Error("匯率來源 HTTP "+r.status);
+    const d = await r.json();
+    const t = d.tether;
+    if (!t || !t.twd) throw new Error("匯率資料不完整");
+    let ok=0, fail=0;
+    codes.forEach(c => {
+      const CUR = c.toUpperCase();
+      if (t[c]) { fxRates[CUR] = t.twd / t[c]; ok++; } else fail++;
+    });
+    fxRates.TWD = 1;
+    return { ok, fail };
+  } catch(e) {
+    console.warn("多幣別匯率抓取失敗，維持上次/保底匯率:", e.message);
+    return { ok:0, fail:codes.length };
+  }
+}
+
 async function fetchTWStockPrices() {
   if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true, err:null };
   const stocks = assets.filter(a => a.cat === "stock_tw");
@@ -2130,7 +2193,7 @@ async function refreshPrices(silent=false) {
   const status = document.getElementById("priceStatus");
   if (status && !silent) status.textContent = "更新價格中…";
 
-  const [c, tw, us] = await Promise.all([fetchCryptoPrices(), fetchTWStockPrices(), fetchUSStockPrices()]);
+  const [c, tw, us, fx] = await Promise.all([fetchCryptoPrices(), fetchTWStockPrices(), fetchUSStockPrices(), fetchFxRates()]);
 
   // 抓到新價格就順手寫回雲端（手動按重新整理時強制寫，自動背景刷新則走節流）
   if (c.ok + tw.ok + us.ok > 0) writeBackPricesToCloud(!silent);
@@ -2201,8 +2264,8 @@ function addDays(d, n) { const r=new Date(d); r.setDate(r.getDate()+n); return r
 // 剩下湊不成一股的零頭不扣，留在來源帳戶。來源如果也是股票（少見的股票換股票），一樣不能有零股。
 // 回傳 true=成功執行、false=價格還沒抓到暫時無法換算（跳過這次，下次補執行時再試）
 function applyRecurringOccurrence(rule, from, to) {
-  const fromUnitPrice = from.cat==="cash" ? 1 : from.price;
-  const toUnitPrice = to.cat==="cash" ? 1 : to.price;
+  const fromUnitPrice = unitPriceOf(from);
+  const toUnitPrice = unitPriceOf(to);
   if (!fromUnitPrice || !toUnitPrice) {
     console.warn(`定期定額 ${rule.id} 因來源或目標尚無即時價格，暫時跳過這次執行`);
     return false;
@@ -2239,8 +2302,8 @@ async function runDueRecurringRules() {
 
     // 價格還沒抓到就不要去搶執行權，避免「搶到了、卻因為換算不出數量而白白浪費這次機會」，
     // 這條規則這次先整條跳過，下次補執行（或明天 Cron）價格應該就有了，會自動重試
-    const fromUnitPrice = from.cat==="cash" ? 1 : from.price;
-    const toUnitPrice = to.cat==="cash" ? 1 : to.price;
+    const fromUnitPrice = unitPriceOf(from);
+    const toUnitPrice = unitPriceOf(to);
     if (!fromUnitPrice || !toUnitPrice) continue;
 
     let cursor = rule.last_run_date ? addDays(new Date(rule.last_run_date+"T00:00:00"), 1)
