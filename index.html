@@ -340,7 +340,7 @@ async function loadFromCloud() {
       assets = data.map((r,i) => ({
         id: r.id, cat: r.cat, name: r.name, color: r.color,
         order: r.sort_order!=null ? Number(r.sort_order) : i,
-        ...(r.cat==="cash" ? { balance: Number(r.balance)||0 }
+        ...(r.cat==="cash" ? { balance: Number(r.balance)||0, currency: r.currency || "TWD" }
                            : { qty: Number(r.qty)||0, price: Number(r.price)||0, symbol: r.symbol||"" })
       }));
     } else {
@@ -353,18 +353,30 @@ async function loadFromCloud() {
 }
 
 // 把單一資產寫回雲端（upsert）
+// 防呆（跟 saveNetWorthSnapshot 的 breakdown 欄位一樣的手法）：先試著連 currency 一起存，
+// 如果 Supabase 那邊 assets 表還沒 alter table 加這個欄位，整筆 upsert 會失敗——
+// 這時候自動退回「不帶 currency」重存一次，至少其他欄位（餘額、名稱…）不會被這個新欄位拖累存不進去。
 async function saveAssetToCloud(a) {
   if (!cloudOn()) return;
+  const payload = {
+    id: a.id, cat: a.cat, name: a.name, color: a.color,
+    balance: a.cat==="cash" ? a.balance : null,
+    currency: a.cat==="cash" ? (a.currency || "TWD") : null,
+    qty: a.cat!=="cash" ? a.qty : null,
+    price: a.cat!=="cash" ? a.price : null,
+    symbol: a.symbol || null,
+    sort_order: a.order ?? 0
+  };
   try {
-    await sb.from("assets").upsert({
-      id: a.id, cat: a.cat, name: a.name, color: a.color,
-      balance: a.cat==="cash" ? a.balance : null,
-      qty: a.cat!=="cash" ? a.qty : null,
-      price: a.cat!=="cash" ? a.price : null,
-      symbol: a.symbol || null,
-      sort_order: a.order ?? 0
-    });
-  } catch(e) { console.warn("雲端儲存失敗:", e.message); }
+    const { error } = await sb.from("assets").upsert(payload);
+    if (error) throw error;
+  } catch(e) {
+    console.warn("雲端儲存失敗（可能是 currency 欄位還沒建，改用舊格式重存一次）:", e.message);
+    try {
+      const { currency, ...fallback } = payload;
+      await sb.from("assets").upsert(fallback);
+    } catch(e2) { console.warn("雲端儲存仍然失敗:", e2.message); }
+  }
 }
 
 async function deleteAssetFromCloud(id) {
