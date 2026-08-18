@@ -275,6 +275,9 @@ const CURRENCIES = {
   AUD: { label: "澳幣", symbol: "A$",  quick: [50,100,500,1000] },
 };
 function currencyOf(a) { return a.currency || "TWD"; }
+// 台幣、日圓平常記帳習慣不記到小數（日圓本來就沒有比 1 圓更小的單位），維持整數輸入；
+// 其他幣別（美元、歐元…）通常會有角/分，允許輸入小數。
+function isWholeCurrency(cur) { return cur === "TWD" || cur === "JPY"; }
 // 匯率快取：{ 幣別代碼: 1單位換算成多少台幣 }，由 fetchFxRates() 定期更新（見即時價那段）。
 // 抓不到即時匯率時先用這組保底值墊著，不會讓外幣帳戶的淨值整個算不出來。
 let fxRates = { TWD:1, USD:32, JPY:0.21, CNY:4.5, EUR:35, HKD:4.1, GBP:41, AUD:21 };
@@ -1460,6 +1463,7 @@ function closeSheet(){ const o=document.getElementById("overlay"); if(o) o.remov
 function openAdjust(id) {
   const a=assets.find(x=>x.id===id); if(!a) return;
   const isCash=a.cat==="cash";
+  const cashWhole = isCash && isWholeCurrency(currencyOf(a)); // 台幣/日圓帳戶維持整數輸入，其他幣別允許小數
   const unit=CATEGORIES[a.cat].unit;
   const sub = isCash
     ? (currencyOf(a)==="TWD" ? `目前 ${mnf(a.balance)}` : `目前 ${CURRENCIES[currencyOf(a)].symbol}${netWorthHidden?"•••••":nf(a.balance)}（≈ ${mnf(valueOf(a))}）`)
@@ -1472,7 +1476,7 @@ function openAdjust(id) {
          <div class="field" style="flex:1"><div class="field-label">幣別</div>
            <select class="sm-input" id="eCur">${Object.entries(CURRENCIES).map(([code,c])=>`<option value="${code}" ${code===currencyOf(a)?"selected":""}>${c.label}（${code}）</option>`).join("")}</select></div>
          <div class="field" style="flex:1"><div class="field-label">餘額</div>
-           <input class="sm-input" id="eBal" type="number" inputmode="numeric" value="${a.balance}"></div>
+           <input class="sm-input" id="eBal" type="number" inputmode="${cashWhole?"numeric":"decimal"}" step="${cashWhole?"1":"any"}" value="${a.balance}"></div>
        </div>`
     : `<div class="field"><div class="field-label">代號</div>
          <input class="sm-input" id="eSym" value="${a.symbol||""}"></div>
@@ -1500,7 +1504,7 @@ function openAdjust(id) {
         <button class="dir-btn add on" id="dAdd">＋ 增加</button>
         <button class="dir-btn sub" id="dSub">－ 減少</button>
       </div>
-      <input class="big-input" id="amt" type="number" inputmode="${(isCash||qtyIsWhole)?"numeric":"decimal"}" step="${(isCash||qtyIsWhole)?"1":"any"}"
+      <input class="big-input" id="amt" type="number" inputmode="${(cashWhole||qtyIsWhole)?"numeric":"decimal"}" step="${(cashWhole||qtyIsWhole)?"1":"any"}"
         placeholder="${isCash?`輸入金額（${CURRENCIES[currencyOf(a)].symbol}）`:"輸入數量（"+unit+"）"}" style="border:1.5px solid ${a.color}66">
       ${isCash?`<div class="quick-row">${CURRENCIES[currencyOf(a)].quick.map(q=>`<button class="quick-btn" data-q="${q}">${q>=1000?(q/1000)+"k":q}</button>`).join("")}</div>`:""}
       <button class="primary-btn" id="applyBtn" disabled style="background:${a.color};color:#fff">確認</button>
@@ -1526,7 +1530,7 @@ function openAdjust(id) {
       </div>
       <div class="field">
         <div class="field-label">從「${a.name}」扣除（${isCash?CURRENCIES[currencyOf(a)].label:unit}）</div>
-        <input class="sm-input" id="tFrom" type="number" inputmode="${(isCash||qtyIsWhole)?"numeric":"decimal"}" step="${(isCash||qtyIsWhole)?"1":"any"}" placeholder="0">
+        <input class="sm-input" id="tFrom" type="number" inputmode="${(cashWhole||qtyIsWhole)?"numeric":"decimal"}" step="${(cashWhole||qtyIsWhole)?"1":"any"}" placeholder="0">
         <div class="warn-sm" id="tFromWarn" style="display:none">餘額不足，目前剩 ${isCash?`${CURRENCIES[currencyOf(a)].symbol}${netWorthHidden?"•••••":nf(a.balance||0)}`:`${a.qty||0}${unit}`}——還是可以送出，超出的部分會扣成 0</div>
       </div>
       <div class="field" id="tToField" style="display:none">
@@ -1589,10 +1593,11 @@ function openAdjust(id) {
       btn.style.background = other.color+"22";
       btn.style.color = "#fff";
       const otherIsCash = other.cat==="cash";
+      const otherCashWhole = otherIsCash && isWholeCurrency(currencyOf(other));
       const otherIsWhole = isWholeShareCat(other.cat);
       const otherUnit = otherIsCash ? CURRENCIES[currencyOf(other)].label : CATEGORIES[other.cat].unit;
       tToLabel.textContent = `轉入「${other.name}」數量（${otherUnit}${otherIsWhole?"，整股":""}）`;
-      tTo.setAttribute("inputmode", (otherIsCash||otherIsWhole) ? "numeric" : "decimal");
+      tTo.setAttribute("inputmode", (otherCashWhole||otherIsWhole) ? "numeric" : "decimal");
       tToField.style.display = "block";
       checkTransferReady();
     };
@@ -1608,8 +1613,13 @@ function openAdjust(id) {
     const v = Number(tFrom.value);
     tFromWarn.style.display = (v>0 && v>available) ? "block" : "none";
   }
-  tFrom.oninput=()=>{ if(isCash||qtyIsWhole) tFrom.value=tFrom.value.replace(/[^\d]/g,""); checkTransferReady(); checkFromBalance(); };
-  tTo.oninput=()=>{ if(transferTarget && (transferTarget.cat==="cash"||isWholeShareCat(transferTarget.cat))) tTo.value=tTo.value.replace(/[^\d]/g,""); checkTransferReady(); };
+  tFrom.oninput=()=>{ if(cashWhole||qtyIsWhole) tFrom.value=tFrom.value.replace(/[^\d]/g,""); else tFrom.value=tFrom.value.replace(/[^\d.]/g,""); checkTransferReady(); checkFromBalance(); };
+  tTo.oninput=()=>{
+    if (!transferTarget) { checkTransferReady(); return; }
+    const targetWhole = (transferTarget.cat==="cash" && isWholeCurrency(currencyOf(transferTarget))) || isWholeShareCat(transferTarget.cat);
+    tTo.value = targetWhole ? tTo.value.replace(/[^\d]/g,"") : tTo.value.replace(/[^\d.]/g,"");
+    checkTransferReady();
+  };
 
   transferBtn.onclick=async ()=>{
     const fromAmt=Number(tFrom.value), toAmt=Number(tTo.value);
@@ -1630,7 +1640,7 @@ function openAdjust(id) {
   const setDir=d=>{dir=d;dAdd.classList.toggle("on",d==="add");dSub.classList.toggle("on",d==="sub");updateLabel();};
   dAdd.onclick=()=>setDir("add"); dSub.onclick=()=>setDir("sub");
   function updateLabel(){ applyBtn.textContent=(dir==="add"?"增加":"減少")+(isCash?"":" "+unit); }
-  amt.oninput=()=>{ if(isCash||qtyIsWhole) amt.value=amt.value.replace(/[^\d]/g,""); applyBtn.disabled=!amt.value; };
+  amt.oninput=()=>{ if(cashWhole||qtyIsWhole) amt.value=amt.value.replace(/[^\d]/g,""); else amt.value=amt.value.replace(/[^\d.]/g,""); applyBtn.disabled=!amt.value; };
   sheet.querySelectorAll(".quick-btn").forEach(b=>b.onclick=()=>{amt.value=b.dataset.q;applyBtn.disabled=false;});
   updateLabel();
   applyBtn.onclick=async ()=>{
@@ -1787,6 +1797,23 @@ function openAdd() {
     if (qtyIsWhole) {
       const fQtyEl = fields.querySelector("#fQty");
       if (fQtyEl) fQtyEl.oninput=()=>{ fQtyEl.value=fQtyEl.value.replace(/[^\d]/g,""); check(); };
+    }
+    if (cat==="cash") {
+      // 幣別下拉選單一改，金額輸入框就跟著切換整數／小數模式（台幣、日圓整數，其他幣別允許小數）
+      const fCurEl = fields.querySelector("#fCur");
+      const fBalEl = fields.querySelector("#fBal");
+      const syncBalMode = () => {
+        const whole = isWholeCurrency(fCurEl.value);
+        fBalEl.inputMode = whole ? "numeric" : "decimal";
+        fBalEl.step = whole ? "1" : "any";
+        fBalEl.value = whole ? fBalEl.value.replace(/[^\d]/g,"") : fBalEl.value.replace(/[^\d.]/g,"");
+      };
+      fCurEl.onchange = syncBalMode;
+      fBalEl.oninput = () => {
+        if (isWholeCurrency(fCurEl.value)) fBalEl.value = fBalEl.value.replace(/[^\d]/g,"");
+        check();
+      };
+      syncBalMode();
     }
     nameEl.focus();
     confirm.onclick=async ()=>{
