@@ -1463,7 +1463,7 @@ function closeSheet(){ const o=document.getElementById("overlay"); if(o) o.remov
 function openAdjust(id) {
   const a=assets.find(x=>x.id===id); if(!a) return;
   const isCash=a.cat==="cash";
-  const cashWhole = isCash && isWholeCurrency(currencyOf(a)); // 台幣/日圓帳戶維持整數輸入，其他幣別允許小數
+  let cashWhole = isCash && isWholeCurrency(currencyOf(a)); // 台幣/日圓帳戶維持整數輸入，其他幣別允許小數（幣別下拉選單改變時會同步更新，見下方 eCur.onchange）
   const unit=CATEGORIES[a.cat].unit;
   const sub = isCash
     ? (currencyOf(a)==="TWD" ? `目前 ${mnf(a.balance)}` : `目前 ${CURRENCIES[currencyOf(a)].symbol}${netWorthHidden?"•••••":nf(a.balance)}（≈ ${mnf(valueOf(a))}）`)
@@ -1643,6 +1643,21 @@ function openAdjust(id) {
   amt.oninput=()=>{ if(cashWhole||qtyIsWhole) amt.value=amt.value.replace(/[^\d]/g,""); else amt.value=amt.value.replace(/[^\d.]/g,""); applyBtn.disabled=!amt.value; };
   sheet.querySelectorAll(".quick-btn").forEach(b=>b.onclick=()=>{amt.value=b.dataset.q;applyBtn.disabled=false;});
   updateLabel();
+
+  // 幣別下拉選單一改，兩個分頁（快速增減／編輯內容）的金額輸入框都要跟著切換整數／小數模式，
+  // 不然剛把幣別從台幣改成美元，餘額欄位還是舊的整數限制，小數點打不進去。
+  if (isCash) {
+    const eCurEl = sheet.querySelector("#eCur");
+    const eBalEl = sheet.querySelector("#eBal");
+    eCurEl.onchange = () => {
+      cashWhole = isWholeCurrency(eCurEl.value);
+      [eBalEl, amt].forEach(el => {
+        el.inputMode = cashWhole ? "numeric" : "decimal";
+        el.step = cashWhole ? "1" : "any";
+        el.value = cashWhole ? el.value.replace(/[^\d]/g,"") : el.value.replace(/[^\d.]/g,"");
+      });
+    };
+  }
   applyBtn.onclick=async ()=>{
     const v=Number(amt.value); if(!v||v<=0) return;
     const sign=dir==="add"?1:-1;
