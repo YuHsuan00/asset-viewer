@@ -684,20 +684,70 @@ function buildDisplayItems() {
 // 面積仍照數值比例分配：列高 ∝ 該列數值總和，列內每項寬度 ∝ 該項數值 / 該列總和。
 let categoryLayout = {};
 
+// 同一分類底下每一列（例如「銀行帳戶」裡 Line Bank / 彰化銀行各一列）最小高度，
+// 避免佔比很小的資產被壓成一條看不出獨立存在感的細線——同樣 7px 的方塊間隙，
+// 貼著一條 10px 高的細線看起來就是特別擠，貼著一個 200px 高的方塊完全沒感覺。
+// 代價：這一列會比它「應得」的數值比例再高一點，擠壓到同分類裡其他列一點點空間，不再是嚴格的數值比例。
+const MIN_ROW_H = 32;
+
+// 把「每列的原始數值」換算成「實際要用的高度」，套用最小高度保護。
+// 演算法：反覆找出「照比例分配後還是不到最小高度」的列，先鎖定給它 minH，
+// 剩下的列用剩餘高度、剩餘比例重新分配——最多跑 n 輪一定會收斂（每輪至少多鎖定一列，或沒有變化就結束）。
+function computeRowHeights(rowValues, totalH, minH) {
+  const n = rowValues.length;
+  if (n===0) return [];
+  const totalValue = rowValues.reduce((s,v)=>s+v,0);
+  if (totalValue<=0) return rowValues.map(()=>0);
+  if (minH*n > totalH) {
+    // 連通通給最小高度都塞不下這個區塊（列數太多或區塊本身太矮）：乾脆平分，不用再算比例
+    const equalH = totalH/n;
+    return rowValues.map(()=>equalH);
+  }
+  const heights = new Array(n).fill(0);
+  const locked = new Array(n).fill(false);
+  let remainingH = totalH, remainingValue = totalValue;
+  for (let iter=0; iter<n; iter++) {
+    let changed = false;
+    for (let i=0;i<n;i++) {
+      if (locked[i]) continue;
+      const proportional = remainingValue>0 ? remainingH*(rowValues[i]/remainingValue) : 0;
+      if (proportional < minH) {
+        heights[i]=minH; locked[i]=true;
+        remainingH -= minH; remainingValue -= rowValues[i];
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  for (let i=0;i<n;i++) {
+    if (!locked[i]) heights[i] = remainingValue>0 ? remainingH*(rowValues[i]/remainingValue) : 0;
+  }
+  // 保險：不管上面怎麼算，最後統一校正讓總和精確等於 totalH，不留空隙也不會溢出容器
+  const sum = heights.reduce((s,v)=>s+v,0);
+  if (sum>0 && Math.abs(sum-totalH)>0.01) {
+    const scale = totalH/sum;
+    for (let i=0;i<n;i++) heights[i]*=scale;
+  }
+  return heights;
+}
+
 function layoutRows(rows, x, y, w, h) {
-  const rowAssetsList = rows.map(row => row.map(id => assets.find(a=>a.id===id)).filter(Boolean));
-  const totalValue = rowAssetsList.reduce((s,list)=>s+list.reduce((s2,a)=>s2+valueOf(a),0),0);
-  if (totalValue<=0) return [];
+  const rowAssetsList = rows
+    .map(row => row.map(id => assets.find(a=>a.id===id)).filter(Boolean))
+    .map(list => ({ list, value: list.reduce((s,a)=>s+valueOf(a),0) }))
+    .filter(r => r.value>0 && r.list.length>0);
+  if (!rowAssetsList.length) return [];
+
+  const rowHeights = computeRowHeights(rowAssetsList.map(r=>r.value), h, MIN_ROW_H);
+
   const nodes = [];
   let curY = y;
-  rowAssetsList.forEach(rowAssets => {
-    const rowValue = rowAssets.reduce((s,a)=>s+valueOf(a),0);
-    if (rowValue<=0) return;
-    const rowH = h * (rowValue/totalValue);
+  rowAssetsList.forEach((r, i) => {
+    const rowH = rowHeights[i];
     let curX = x;
-    rowAssets.forEach(a => {
+    r.list.forEach(a => {
       const v = valueOf(a);
-      const itemW = w * (v/rowValue);
+      const itemW = w * (v/r.value);
       nodes.push({ id:a.id, value:v, ref:a, x:curX, y:curY, w:itemW, h:rowH });
       curX += itemW;
     });
