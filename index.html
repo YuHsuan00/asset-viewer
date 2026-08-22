@@ -233,6 +233,10 @@
   <div class="wrap">
     <div class="section-label" style="display:flex;align-items:center;justify-content:space-between">
       <span>組成</span>
+      <button class="mode-btn" id="ungroupedBtn" title="不分類群組，依大小混排">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="10" width="8" height="11" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/></svg>
+        <span>不分類混排</span>
+      </button>
     </div>
     <div id="legend"></div>
   </div>
@@ -782,10 +786,23 @@ function healCategoryLayouts(bigList) {
 // 拖曳/存版面時要用的 key：現在只依分類分開存版面（自由排列模式已移除）
 function layoutKey(a) { return a.cat; }
 
+// 不分類混排：treemap 不再依四大分類分區塊，全部資產（含「其他」小額整包）直接混在一起，
+// 用 squarified treemap 依數值大小排（大的自動排到左上角開始鋪），不受分類限制。
+let ungroupedView = false;
+try { ungroupedView = localStorage.getItem("assel_ungrouped") === "1"; } catch(e) {}
+
 function layoutGrouped(w, h) {
   const { big, small } = buildDisplayItems();
   const smallVal = small.reduce((s,a)=>s+valueOf(a),0);
 
+  if (ungroupedView) {
+    // 不分類群組：所有夠大的資產（不分四大類）直接混在一起丟給 squarified treemap，
+    // 演算法本身就是依數值由大到小排、從容器左上角開始鋪，不用另外處理排序。
+    const items = big.map(a => ({ id:a.id, value:valueOf(a), ref:a }));
+    if (smallVal>0) items.push({ id:"__other__", value:smallVal,
+      ref:{ id:"__other__", name:"其他", color:OTHER_COLOR, isOther:true, members:small } });
+    return layoutTreemap(items, 0, 0, w, h);
+  }
 
   healCategoryLayouts(big);
   // 分群：各 cat 一區，額外一個 "其他" 區（若有 small）
@@ -2119,6 +2136,15 @@ eyeBtn.onclick = () => {
   renderAll(false); // 重新渲染整個畫面（方塊、組成清單、圖表），讓所有地方的金額同步隱藏／顯示
 };
 document.getElementById("refreshBtn").onclick=()=>refreshPrices(false);
+
+const ungroupedBtn = document.getElementById("ungroupedBtn");
+ungroupedBtn.classList.toggle("on", ungroupedView);
+ungroupedBtn.onclick = () => {
+  ungroupedView = !ungroupedView;
+  try { localStorage.setItem("assel_ungrouped", ungroupedView ? "1" : "0"); } catch(e) {}
+  ungroupedBtn.classList.toggle("on", ungroupedView);
+  renderAll(false);
+};
 
 // 圖表手勢查值：長按/拖曳圖表任一處，跟手顯示十字線與該時間點的數字；放開手指恢復正常顯示
 (() => {
