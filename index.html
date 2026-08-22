@@ -998,13 +998,16 @@ function renderTreemap() {
       bottom.style.marginLeft = "";
       bottom.style.width = "100%";
 
-      // 名稱：隱藏金額時，把原本金額佔的那一行讓給名稱（空間夠的話），
-      // 這樣即使是中等大小的方塊也能看到自己是誰，不會只剩一個孤零零的百分比
-      const showNameHere = !showVal && level>=2;
+      // 名稱：以前只有「隱藏金額+夠大的 level 2」才會顯示，平常模式下小方塊一律只剩百分比——
+      // 分類分區塊時還有顏色群聚當提示（旁邊都是綠的，猜得出是銀行帳戶），但「不分類混排」把這個
+      // 提示拿掉了，一個孤零零的百分比色塊完全認不出是誰。.tile-name 本來就有 ellipsis 溢出省略，
+      // 放不下會自動截斷成「...」，不用先精算塞不塞得下，所以這裡放寬到 level>=1 就先試著顯示。
+      // level 0（真的窄到連一個字都擠不下）才維持純百分比，這是物理空間的極限，不是刻意藏起來。
+      const showNameHere = level>=1;
       if (showNameHere) {
         nameEl.style.display="block";
         nameEl.textContent = nameStr;
-        nameEl.style.fontSize = "12px";
+        nameEl.style.fontSize = (level>=2 ? 12 : 9.5)+"px";
         nameEl.style.lineHeight = "1.15";
         nameEl.style.color = a.isOther ? "#c8ccd4" : "#fff";
         nameEl.style.flex = "";
