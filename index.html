@@ -1120,6 +1120,25 @@ function renderLegend() {
     });
     g.appendChild(items); box.appendChild(g);
   });
+
+  // 資料異常區：cat 不是四大分類之一的資產，平常會被上面的 GROUP_ORDER 迴圈整個濾掉、
+  // 完全看不到也點不到（只有「不分類混排」不篩 cat 才會露出來，非常難發現）。
+  // 這裡額外撈出來獨立列一區，不管在不在混排模式都看得到、點得到，才有機會處理掉。
+  const broken = assets.filter(a => !CATEGORIES[a.cat]);
+  if (broken.length) {
+    const g=document.createElement("div"); g.className="legend-group";
+    g.innerHTML=`<div class="legend-head">
+      <span class="g-name-row"><span class="g-name" style="color:#d9645a">⚠️ 資料異常（${broken.length}）</span></span>
+    </div>`;
+    const items=document.createElement("div"); items.className="legend-items";
+    broken.forEach(a=>{
+      const it=document.createElement("div"); it.className="legend-item";
+      it.innerHTML=`<span class="swatch" style="background:${a.color||'#666'}"></span><span class="li-name">${a.name||"(無名稱)"}</span><span class="li-qty">cat: ${a.cat||"(空白)"}</span>`;
+      it.addEventListener("click",()=>openAdjust(a.id));
+      items.appendChild(it);
+    });
+    g.appendChild(items); box.appendChild(g);
+  }
 }
 
 // ── 折線圖：近 24 個月，月度聚合 + 平滑曲線，可切換看總資產或個別大分類 ──
@@ -1579,9 +1598,38 @@ function showSheet(html, accent) {
 }
 function closeSheet(){ const o=document.getElementById("overlay"); if(o) o.remove(); }
 
+// ── 資料損毀資產的診斷面板：a.cat 不是四大分類之一，正常的編輯面板邏輯套不上去。
+// 把原始欄位攤開顯示，讓使用者至少看得到、確認得了這是什麼，並提供刪除——
+// 不然這種資料會永遠卡在「點不開、清單也濾掉看不到」的狀態，無法處理。
+function openBrokenAssetSheet(a) {
+  const rows = ["id","cat","name","balance","currency","qty","price","symbol","color"]
+    .filter(k => a[k]!==undefined && a[k]!==null && a[k]!=="")
+    .map(k => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #23252e;font-size:13px">
+      <span style="color:#6b7280">${k}</span><span style="color:#e8eaed;word-break:break-all;text-align:right;margin-left:12px">${String(a[k])}</span>
+    </div>`).join("");
+  const sheet = showSheet(`
+    <div class="sheet-title">⚠️ 資料異常</div>
+    <div class="note-sm">這筆資產的分類欄位（cat）不是「銀行帳戶／虛擬貨幣／台股／美股」四種之一，正常的編輯畫面沒辦法處理，只能在這裡看原始資料、直接刪除。</div>
+    <div style="margin:12px 0">${rows}</div>
+    <button class="del-btn" id="brokenDelBtn">刪除此資產</button>
+  `, "#d9645a");
+  sheet.querySelector("#brokenDelBtn").onclick = async (e) => {
+    e.target.disabled=true; e.target.textContent="刪除中…";
+    assets = assets.filter(x=>x.id!==a.id);
+    await commit(a, {deleted:true});
+  };
+}
+
 // ── 調整資產（含編輯名稱、直接改值、快速增減）──
 function openAdjust(id) {
   const a=assets.find(x=>x.id===id); if(!a) return;
+
+  // 防呆：a.cat 不是四大分類其中之一（資料損毀，例如分類欄位被清空或打錯字），
+  // 下面所有分頁邏輯都是照 4 個已知分類寫的，硬套下去會直接 crash、面板整個開不出來，
+  // 使用者只會看到「點了沒反應」，完全不知道發生什麼事。改成先攔下來，
+  // 給一個最小化的診斷面板：把原始欄位攤開來看，並提供刪除，不然這筆資料會卡住永遠碰不到。
+  if (!CATEGORIES[a.cat]) { openBrokenAssetSheet(a); return; }
+
   const isCash=a.cat==="cash";
   let cashWhole = isCash && isWholeCurrency(currencyOf(a)); // 台幣/日圓帳戶維持整數輸入，其他幣別允許小數（幣別下拉選單改變時會同步更新，見下方 eCur.onchange）
   const unit=CATEGORIES[a.cat].unit;
@@ -1819,7 +1867,7 @@ function openAdjust(id) {
 // ── 「其他」展開 ──
 function openOtherSheet(other) {
   const rows=other.members.map(a=>{
-    const unit=CATEGORIES[a.cat].unit;
+    const unit=CATEGORIES[a.cat]?.unit ?? "";
     return `<div class="legend-item" data-id="${a.id}" style="justify-content:space-between;width:100%;padding:12px 0;border-bottom:1px solid #1f222a">
       <span style="display:flex;align-items:center;gap:9px"><span class="swatch" style="background:${a.color}"></span><span class="li-name">${a.name}</span></span>
       <span style="font-size:13px;color:#8a94a6;font-variant-numeric:tabular-nums">${mnf(valueOf(a))}</span>
