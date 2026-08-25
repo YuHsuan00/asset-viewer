@@ -489,6 +489,33 @@ async function loadAssetSnapshots() {
   } catch(e) { console.warn("每週資產快照載入失敗:", e.message); return false; }
 }
 
+// 讀單一資產的買賣/編輯事件紀錄（asset_events 表），供「這個部位過去的持倉價值」那個
+// 專屬歷史畫面用——標出 B(買進/轉入)、S(賣出/轉出)、E(編輯) 符號。
+// 這張表是全新的，只有從這個版本開始才會累積資料，不會有更早之前的紀錄。
+let assetEventHistory = {}; // { assetId: [{t, type, delta, value, counterpartyName}, ...] }
+async function loadAssetEvents() {
+  if (!cloudOn()) return false;
+  try {
+    const { data, error } = await sb.from("asset_events")
+      .select("asset_id,type,delta,value_at_time,counterparty_name,created_at")
+      .order("created_at", { ascending: true })
+      .limit(5000);
+    if (error) throw error;
+    const grouped = {};
+    (data||[]).forEach(r => {
+      if (!grouped[r.asset_id]) grouped[r.asset_id] = [];
+      grouped[r.asset_id].push({
+        t: new Date(r.created_at).getTime(), type: r.type,
+        delta: r.delta!=null ? Number(r.delta) : null,
+        value: r.value_at_time!=null ? Number(r.value_at_time) : null,
+        counterpartyName: r.counterparty_name || null,
+      });
+    });
+    assetEventHistory = grouped;
+    return true;
+  } catch(e) { console.warn("交易事件載入失敗（可能是 asset_events 表還沒建）:", e.message); return false; }
+}
+
 // 分類走勢資料來源：優先用 net_worth_history.breakdown（同一時間點總覽較準確），
 // 缺資料的日期（breakdown 是 null，例如 breakdown 欄位還沒開始蒐集前的舊資料）
 // 就用 asset_snapshots 依日期把同分類底下所有資產加總補上，兩邊用「同一天」對齊合併。
@@ -1055,6 +1082,141 @@ function renderTreemap() {
 }
 
 // ── 方塊互動：點擊 = 開啟調整面板（拖曳排列功能已移除，方塊只能點擊，不能拖動調整順序）──
+// ── 單一資產的專屬歷史圖：每週快照 + 現在即時值連成線，疊上買賣/編輯事件的 B/S/E 標記 ──
+// 刻意不沿用主圖表那套「週五對齊格線」邏輯——這裡是「以資產自己的實際資料點」為準的連續時間軸，
+// 事件可能發生在任何一天，硬套週格線會讓標記位置對不準，這是這個畫面自己專屬的座標系統。
+let assetHistLayout = null; // 記住這次渲染的座標換算，供手勢查值用
+let assetHistScrubbing = false;
+
+function renderAssetHistoryChart(a) {
+  const svg = document.getElementById("assetHistSvg");
+  const tip = document.getElementById("assetHistTooltip");
+  if (!svg) return;
+
+  const snaps = (assetSnapshotHistory[a.id] || []).map(p => ({ t:p.t, v:p.v }));
+  const events = (assetEventHistory[a.id] || []).slice().sort((x,y)=>x.t-y.t);
+  const liveV = valueOf(a);
+  const now = Date.now();
+
+  // 資料點：每週快照 + 現在的即時值。這是資產自己的專屬視角，重點是走勢跟事件對應關係，
+  // 不像主圖表那麼講究「已定案 vs 還在累積」的區分，所以直接合併成一條連續線。
+  const points = [...snaps, { t: now, v: liveV }].sort((x,y)=>x.t-y.t);
+
+  if (points.length < 2 && events.length === 0) {
+    svg.innerHTML = `<text x="170" y="95" fill="#5b616e" font-size="12" text-anchor="middle">還沒有足夠的歷史資料</text>`;
+    assetHistLayout = null;
+    if (tip) tip.style.display = "none";
+    return;
+  }
+
+  const W=340, H=190, padL=44, padR=14, padT=16, padB=26;
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+
+  const allTimes = [...points.map(p=>p.t), ...events.map(e=>e.t)];
+  const tMin = Math.min(...allTimes);
+  const tMax = now;
+  const tSpan = Math.max(tMax-tMin, 24*3600*1000); // 避免只有一天資料時除以 0
+
+  let maxVal = 0;
+  points.forEach(p=>{ if(p.v>maxVal) maxVal=p.v; });
+  events.forEach(e=>{ if(e.value!=null && e.value>maxVal) maxVal=e.value; });
+  if (maxVal<=0) maxVal=1;
+
+  const xAt = t => padL + ((t-tMin)/tSpan)*plotW;
+  const yAt = v => padT + plotH - (v/maxVal)*plotH;
+
+  // Y 軸格線（固定從 0 開始，跟主圖表一致）
+  let axisSvg = "";
+  [0, maxVal/2, maxVal].forEach(tv=>{
+    const y = yAt(tv);
+    axisSvg += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="#20222b" stroke-width="1"/>`;
+    axisSvg += `<text x="${padL-6}" y="${(y+3).toFixed(1)}" fill="#5b616e" font-size="9" text-anchor="end">${netWorthHidden?"•••":formatAxisNum(tv)}</text>`;
+  });
+  const fmtDate = t => { const d=new Date(t); return `${d.getMonth()+1}/${d.getDate()}`; };
+  axisSvg += `<text x="${padL}" y="${H-6}" fill="#5b616e" font-size="9" text-anchor="start">${fmtDate(tMin)}</text>`;
+  axisSvg += `<text x="${W-padR}" y="${H-6}" fill="#5b616e" font-size="9" text-anchor="end">今天</text>`;
+
+  // 折線本身
+  const pts = points.map(p=>[xAt(p.t), yAt(p.v)]);
+  let lineSvg = "";
+  if (pts.length>=2) {
+    const path = smoothPath(pts);
+    const area = path + ` L${pts[pts.length-1][0].toFixed(1)} ${(H-padB).toFixed(1)} L${pts[0][0].toFixed(1)} ${(H-padB).toFixed(1)} Z`;
+    lineSvg += `<defs><linearGradient id="assetHistGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${a.color}" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="${a.color}" stop-opacity="0"/>
+    </linearGradient></defs><path d="${area}" fill="url(#assetHistGrad)"/>`;
+    lineSvg += `<path d="${path}" fill="none" stroke="${a.color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
+  }
+  pts.forEach(([x,y],i)=>{
+    lineSvg += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${i===pts.length-1?3.5:2}" fill="${a.color}"/>`;
+  });
+
+  // 事件標記：B(買進/轉入)=綠、S(賣出/轉出)=紅、E(編輯)=黃，畫在對應時間點、對應金額的高度上
+  const markerColor = { buy:"#3ecf8e", sell:"#f16a6a", edit:"#e8c74a" };
+  const markerLabel = { buy:"B", sell:"S", edit:"E" };
+  let markerSvg = "";
+  events.forEach(e=>{
+    const x = xAt(e.t);
+    const y = e.value!=null ? yAt(e.value) : (padT+plotH*0.5);
+    const col = markerColor[e.type] || "#8a94a6";
+    markerSvg += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="8" fill="${col}" fill-opacity="0.92" stroke="#0e0f13" stroke-width="1.5"/>`;
+    markerSvg += `<text x="${x.toFixed(1)}" y="${(y+3.5).toFixed(1)}" fill="#0e0f13" font-size="9" font-weight="800" text-anchor="middle">${markerLabel[e.type]||"?"}</text>`;
+  });
+
+  svg.innerHTML = axisSvg + lineSvg + markerSvg + `<g id="assetHistScrubLayer"></g>`;
+
+  assetHistLayout = { W, H, padL, padR, padT, padB, tMin, tMax, tSpan, maxVal, xAt, yAt, points, events, asset:a };
+
+  if (!svg.dataset.wired) {
+    svg.dataset.wired = "1";
+    svg.addEventListener("pointerdown", (e)=>{ assetHistScrubbing=true; try{svg.setPointerCapture(e.pointerId);}catch(err){} updateAssetHistScrub(e.clientX); });
+    svg.addEventListener("pointermove", (e)=>{ if(assetHistScrubbing) updateAssetHistScrub(e.clientX); });
+    svg.addEventListener("pointerup", ()=>{ assetHistScrubbing=false; });
+    svg.addEventListener("pointerleave", ()=>{ assetHistScrubbing=false; });
+  }
+}
+
+function updateAssetHistScrub(clientX) {
+  if (!assetHistLayout) return;
+  const svg = document.getElementById("assetHistSvg");
+  const tip = document.getElementById("assetHistTooltip");
+  if (!svg || !tip) return;
+  const rect = svg.getBoundingClientRect();
+  if (!rect.width) return;
+  const { W, padL, padR, padT, H, padB, tMin, tSpan, points, asset } = assetHistLayout;
+  const relX = (clientX-rect.left)/rect.width*W;
+  const plotW = W-padL-padR;
+  const frac = Math.max(0, Math.min(1, (relX-padL)/plotW));
+  const t = tMin + frac*tSpan;
+
+  // 找離這個時間點最近的資料點（資料點間距不固定，不能用主圖表那種固定週格子的算法）
+  let nearest = points[0], minDiff = Infinity;
+  points.forEach(p=>{ const d=Math.abs(p.t-t); if(d<minDiff){minDiff=d;nearest=p;} });
+
+  // 算當時佔淨資產的比例：從 net_worth_history 裡找不晚於這個時間點、離它最近的一筆；
+  // 真的找不到（資料比淨值歷史還早）才退而求其次找全部裡離這個時間點最近的
+  let nwEntry = null, best=Infinity;
+  history.forEach(h=>{ if(h.t<=nearest.t){ const d=nearest.t-h.t; if(d<best){best=d;nwEntry=h;} } });
+  if (!nwEntry && history.length) nwEntry = history.reduce((x,y)=> Math.abs(x.t-nearest.t)<Math.abs(y.t-nearest.t) ? x : y);
+  const pct = (nwEntry && nwEntry.v>0) ? (nearest.v/nwEntry.v*100) : null;
+
+  const g = document.getElementById("assetHistScrubLayer");
+  const x = assetHistLayout.xAt(nearest.t), y = assetHistLayout.yAt(nearest.v);
+  if (g) g.innerHTML = `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${H-padB}" stroke="#8a94a6" stroke-width="1" stroke-dasharray="3,3" stroke-opacity="0.5"/>
+    <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5" fill="${asset.color}" stroke="#0e0f13" stroke-width="1.5"/>`;
+
+  const d = new Date(nearest.t);
+  tip.innerHTML = `<div style="font-size:10px;color:#5b616e;margin-bottom:3px">${d.getMonth()+1}/${d.getDate()}</div>
+    <div style="font-size:13px;font-weight:700;color:#e8eaed">${mnf(nearest.v)}</div>
+    ${pct!=null?`<div style="font-size:11px;color:#8a94a6">佔淨資產 ${pct.toFixed(1)}%</div>`:""}`;
+  tip.style.display="block";
+  tip.style.top="4px"; tip.style.bottom="auto";
+  const relX01 = (clientX-rect.left)/rect.width;
+  if (relX01<0.5) { tip.style.left="auto"; tip.style.right="4px"; }
+  else { tip.style.left="4px"; tip.style.right="auto"; }
+}
+
 function attachTileInteraction(el, assetRef) {
   el.addEventListener("click", () => {
     if (assetRef.isOther) {
@@ -1521,6 +1683,20 @@ function pushHistory() {
 }
 
 // 資料變動後統一呼叫：記歷史 + 存雲端 + 關面板 + 重繪
+// 交易事件紀錄：轉入=買進(buy)、轉出=賣出(sell)、其他直接改動(快速增減/編輯內容)=編輯(edit)。
+// 這是全新的資料表，從這個版本開始才有紀錄，之前的異動沒有留下痕跡、補不回來。
+// 寫入失敗不該擋住資產本身的異動（那才是主要的事），所以這裡永遠不 throw，只記警告。
+async function logAssetEvent(assetId, type, { delta=null, valueAtTime=null, counterpartyId=null, counterpartyName=null, assetName=null } = {}) {
+  if (!cloudOn()) return;
+  try {
+    await sb.from("asset_events").insert({
+      asset_id: assetId, asset_name: assetName, type,
+      delta, value_at_time: valueAtTime,
+      counterparty_id: counterpartyId, counterparty_name: counterpartyName,
+    });
+  } catch(e) { console.warn("交易紀錄寫入失敗（不影響資產本身的異動）:", e.message); }
+}
+
 async function commit(changedAsset, opts={}) {
   pushHistory();
   // 等雲端真的存完才關視窗/繼續，避免使用者存完立刻鎖螢幕、切走，
@@ -1529,23 +1705,34 @@ async function commit(changedAsset, opts={}) {
   if (changedAsset && !opts.deleted) tasks.push(withTimeout(saveAssetToCloud(changedAsset), 10000, "資產儲存"));
   if (opts.deleted && changedAsset) tasks.push(withTimeout(deleteAssetFromCloud(changedAsset.id), 10000, "資產刪除"));
   tasks.push(withTimeout(saveNetWorthSnapshot(netWorth()), 10000, "淨值快照")); // 雲端也記一筆淨值快照，供跨裝置折線圖
+  // 直接改動（快速增減／編輯內容）算一筆「編輯」事件，刪除或新增資產不算（那些不是「這個部位的持倉變化」）
+  if (opts.event && changedAsset && !opts.deleted) {
+    tasks.push(logAssetEvent(changedAsset.id, opts.event.type, {
+      ...opts.event, assetName: changedAsset.name, valueAtTime: valueOf(changedAsset),
+    }));
+  }
   await Promise.all(tasks);
   if (!opts.keepSheet) closeSheet();
   renderAll();
 }
 
 // 資產互轉專用：一次存兩邊資產（From 扣、To 加），只記一筆歷史快照，避免 commit() 呼叫兩次造成重複記錄
-async function commitTransfer(fromAsset, toAsset) {
+async function commitTransfer(fromAsset, toAsset, fromAmt, toAmt) {
   pushHistory();
   const tasks = [
     withTimeout(saveAssetToCloud(fromAsset), 10000, "轉出來源"),
     withTimeout(saveAssetToCloud(toAsset), 10000, "轉出目標"),
     withTimeout(saveNetWorthSnapshot(netWorth()), 10000, "淨值快照"),
+    // 轉出那邊記一筆賣出(sell)，轉入那邊記一筆買進(buy)，互相標記對方是誰，
+    // 這樣之後看單一資產的歷史時，才能在線上標出 B/S 符號
+    logAssetEvent(fromAsset.id, "sell", { delta: fromAmt, valueAtTime: valueOf(fromAsset), assetName: fromAsset.name, counterpartyId: toAsset.id, counterpartyName: toAsset.name }),
+    logAssetEvent(toAsset.id, "buy", { delta: toAmt, valueAtTime: valueOf(toAsset), assetName: toAsset.name, counterpartyId: fromAsset.id, counterpartyName: fromAsset.name }),
   ];
   await Promise.all(tasks);
   closeSheet();
   renderAll();
 }
+
 
 // ── 淨值變化指標：跟過去某個時間點（優先抓 7 天前）比較漲跌 ──
 // 資料不夠久（例如剛開始蒐集歷史）時，不硬凹說「較上週」，改成老實顯示「較 X 天前」。
@@ -1665,6 +1852,7 @@ function openAdjust(id) {
       <button class="seg-btn on" id="segQuick">快速增減</button>
       <button class="seg-btn" id="segEdit">編輯內容</button>
       <button class="seg-btn" id="segTransfer">轉出</button>
+      <button class="seg-btn" id="segHistory">歷史</button>
     </div>
 
     <div id="paneQuick">
@@ -1708,6 +1896,16 @@ function openAdjust(id) {
       <button class="primary-btn" id="transferBtn" disabled style="background:${a.color};color:#fff">確認轉出</button>
     </div>
 
+    <div id="paneHistory" style="display:none">
+      <div style="position:relative">
+        <svg id="assetHistSvg" viewBox="0 0 340 190" preserveAspectRatio="none" style="width:100%;display:block"></svg>
+        <div class="chart-tooltip" id="assetHistTooltip" style="display:none"></div>
+      </div>
+      <div class="note-sm" id="assetHistLegend" style="margin-top:6px">
+        <span style="color:#3ecf8e;font-weight:700">B</span> 買進/轉入　<span style="color:#f16a6a;font-weight:700">S</span> 賣出/轉出　<span style="color:#e8c74a;font-weight:700">E</span> 編輯　－　按住線圖可查看當時金額與佔淨資產比例
+      </div>
+    </div>
+
     <button class="del-btn" id="delBtn">刪除此資產</button>
   `, a.color);
 
@@ -1720,14 +1918,16 @@ function openAdjust(id) {
     };
   });
 
-  // 分頁切換（三分頁通用）
+  // 分頁切換（四分頁通用）
   const paneQuick=sheet.querySelector("#paneQuick");
   const paneEdit=sheet.querySelector("#paneEdit");
   const paneTransfer=sheet.querySelector("#paneTransfer");
+  const paneHistory=sheet.querySelector("#paneHistory");
   const segQuick=sheet.querySelector("#segQuick");
   const segEdit=sheet.querySelector("#segEdit");
   const segTransfer=sheet.querySelector("#segTransfer");
-  const tabs = [["segQuick",segQuick,paneQuick], ["segEdit",segEdit,paneEdit], ["segTransfer",segTransfer,paneTransfer]];
+  const segHistory=sheet.querySelector("#segHistory");
+  const tabs = [["segQuick",segQuick,paneQuick], ["segEdit",segEdit,paneEdit], ["segTransfer",segTransfer,paneTransfer], ["segHistory",segHistory,paneHistory]];
   function switchTab(activeBtn) {
     tabs.forEach(([id,btn,pane])=>{
       const on = btn===activeBtn;
@@ -1738,6 +1938,7 @@ function openAdjust(id) {
   segQuick.onclick=()=>switchTab(segQuick);
   segEdit.onclick=()=>switchTab(segEdit);
   segTransfer.onclick=()=>switchTab(segTransfer);
+  segHistory.onclick=()=>{ switchTab(segHistory); renderAssetHistoryChart(a); };
 
   // ── 轉出：從這個資產扣一點、轉去另一個資產加一點，兩邊金額分別手動輸入 ──
   let transferTarget = null;
@@ -1798,7 +1999,7 @@ function openAdjust(id) {
     if(tgt.cat==="cash") tgt.balance=(tgt.balance||0)+toAmt;
     else tgt.qty=roundQty(+((tgt.qty||0)+toAmt).toFixed(8), tgt.cat);
     transferBtn.disabled=true; transferBtn.textContent="轉出中…";
-    await commitTransfer(a, tgt);
+    await commitTransfer(a, tgt, fromAmt, toAmt);
   };
 
   // ── 快速增減 ──
@@ -1831,12 +2032,13 @@ function openAdjust(id) {
     if(isCash) a.balance=Math.max(0,a.balance+sign*v);
     else a.qty=Math.max(0,roundQty(+(a.qty+sign*v).toFixed(8), a.cat));
     applyBtn.disabled=true; applyBtn.textContent="儲存中…";
-    await commit(a);
+    await commit(a, { event:{ type:"edit", delta:sign*v } });
   };
 
   // ── 編輯內容（改名稱、直接設定值）──
   const saveBtnEl = sheet.querySelector("#saveBtn");
   saveBtnEl.onclick=async ()=>{
+    const beforeVal = valueOf(a);
     const newName=sheet.querySelector("#eName").value.trim();
     if(newName) a.name=newName;
     if(isCash){
@@ -1854,7 +2056,8 @@ function openAdjust(id) {
     }
     a.color = pendingColor;
     saveBtnEl.disabled=true; saveBtnEl.textContent="儲存中…";
-    await commit(a);
+    const afterVal = valueOf(a);
+    await commit(a, { event: Math.abs(afterVal-beforeVal)>0.01 ? { type:"edit", delta:afterVal-beforeVal } : null });
   };
 
   sheet.querySelector("#delBtn").onclick=async (e)=>{
@@ -2594,6 +2797,7 @@ async function boot() {
       await withTimeout(runDueRecurringRules(), 15000, "定期定額補執行");
       const gotHistory = await withTimeout(loadNetWorthHistory(), 15000, "歷史載入");
       await withTimeout(loadAssetSnapshots(), 15000, "每週資產快照載入");
+      await withTimeout(loadAssetEvents(), 15000, "交易事件載入");
       // 雲端還沒有任何歷史點（例如第一次啟用同步）：補記目前這筆，讓折線圖有起點
       if (!gotHistory || history.length===0) {
         pushHistory();
