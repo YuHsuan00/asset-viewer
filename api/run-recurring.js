@@ -8,6 +8,23 @@
 //      定期定額表面上開著、實際上永遠不會執行，而且不會有任何錯誤訊息
 // 現在改成：先抓即時價 → 用即時價換算 → 順手把即時價寫回 assets.price。
 //
+// ⚠️ 也補上事件紀錄（2026/08）：App 前端手動操作（轉出/快速增減/編輯內容）已經會記一筆 buy/sell/edit
+// 到 asset_events 表，但定期定額是這支伺服器排程自動執行的，完全不會經過前端那段程式碼，
+// 之前這裡完全沒有留下痕跡——使用者的「歷史」分頁看不到任何自動扣款的 B 標記。這裡補上同樣的紀錄邏輯。
+
+async function logAssetEvent(SUPABASE_URL, headers, assetId, assetName, type, { delta, valueAtTime, counterpartyId, counterpartyName }) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/asset_events`, {
+      method: "POST", headers,
+      body: JSON.stringify({
+        asset_id: assetId, asset_name: assetName, type, delta,
+        value_at_time: valueAtTime, counterparty_id: counterpartyId, counterparty_name: counterpartyName,
+      }),
+    });
+  } catch (e) { console.warn("交易事件寫入失敗（不影響定期定額本身的扣款）:", e.message); }
+}
+
+//
 // 需要在 Vercel 專案設定 → Environment Variables 加兩個變數（跟 index.html 裡用的是同一組）：
 //   SUPABASE_URL      例：https://xxxxx.supabase.co
 //   SUPABASE_ANON_KEY 例：eyJhbGci....
@@ -121,6 +138,20 @@ export default async function handler(req, res) {
       // 同步更新記憶體中的資產值，供下面算淨值快照用
       Object.assign(from, fromPatch);
       Object.assign(to, toPatch);
+
+      // 記一筆事件：來源扣款算「賣出」、目標入帳算「買進」，互相標記對方是誰——
+      // 跟前端手動轉帳的紀錄格式完全一致，之後「歷史」分頁的 B/S 標記不會分不出是手動還是自動執行的
+      await Promise.all([
+        logAssetEvent(SUPABASE_URL, headers, from.id, from.name, "sell", {
+          delta: fromDelta, valueAtTime: valueOfAsset(from, livePrices),
+          counterpartyId: to.id, counterpartyName: to.name,
+        }),
+        logAssetEvent(SUPABASE_URL, headers, to.id, to.name, "buy", {
+          delta: toDelta, valueAtTime: valueOfAsset(to, livePrices),
+          counterpartyId: from.id, counterpartyName: from.name,
+        }),
+      ]);
+
       executed++;
     }
 
