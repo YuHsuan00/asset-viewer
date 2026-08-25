@@ -834,9 +834,17 @@ function layoutGrouped(w, h) {
 let animatedNW = netWorth();
 let lastNodes = []; // 上一次渲染的方塊位置，供拖曳時判斷「拖到哪個方塊上」
 let draggingId = null; // 目前正在被拖曳的資產 id（null=沒有在拖）
+let lastRenderMode = null; // 上次渲染時是不是「不分類混排」，切換模式當下強制清空重建（見下方）
 
 function renderTreemap() {
   const inner = document.getElementById("treemap-inner");
+  // 分類／不分類混排兩種模式的方塊排法差很多，如果沿用舊的 DOM 元素，
+  // 一旦中途有任何一個資產處理出狀況導致「清除消失的方塊」那步沒跑到，
+  // 殘影就會卡住、兩種模式來回切都清不掉。切換模式的當下乾脆整個清空重建，不沿用任何舊元素，
+  // 保證不會有上一個模式（或更早之前、任何原因造成）留下的殘影方塊跨越切換存活下來。
+  if (lastRenderMode !== null && lastRenderMode !== ungroupedView) inner.innerHTML = "";
+  lastRenderMode = ungroupedView;
+
   const rect = inner.getBoundingClientRect();
   const W = rect.width, H = rect.height;
   const nodes = layoutGrouped(W, H);
@@ -847,8 +855,10 @@ function renderTreemap() {
   const seen = new Set();
 
   nodes.forEach(n => {
+   // 先加進 seen 再處理內容——就算這個項目後面處理失敗，也不會被誤判成「消失了」而被清除掉一個其實還在的方塊
+   seen.add(n.id);
+   try {
     const a = n.ref;
-    seen.add(n.id);
     const pct = (n.value/nw)*100;
 
     // 依方塊「形狀」決定排版，兩種模式都用實際量測文字所需空間來判斷（不用猜的固定門檻）：
@@ -1034,6 +1044,11 @@ function renderTreemap() {
       valEl.style.textAlign = "left";
       valEl.style.width = "100%";
     }
+   } catch(e) {
+    // 單一資產渲染失敗不該讓整個 treemap 掛掉——記錄下來，繼續處理剩下的項目，
+    // 下面「移除消失的」清理步驟一定會跑到，不會再卡住留下永久殘影
+    console.warn("方塊渲染失敗（id="+n.id+"）:", e.message);
+   }
   });
   // 移除消失的
   Object.keys(existing).forEach(id=>{ if(!seen.has(id)) existing[id].remove(); });
