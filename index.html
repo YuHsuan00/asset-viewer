@@ -1088,34 +1088,37 @@ function renderTreemap() {
 let assetHistLayout = null; // 記住這次渲染的座標換算，供手勢查值用
 let assetHistScrubbing = false;
 
+// 這個「歷史」分頁固定從這個日期開始累積，不管 asset_snapshots 裡更早以前多零散、
+// 甚至混著測試用的雜訊資料——反正 B/S/E 事件本來就是從這個版本才開始記錄，
+// 乾脆讓價值線也跟著從同一天起跑，兩者才會是同一套時間軸，不會看起來斷斷續續、資料東一點西一點。
+// 這個日期用當天凌晨 0 點固定住，不會每天重新渲染就往後跳，才能真正累積出連續的走勢。
+const ASSET_HISTORY_EPOCH = new Date(2026, 7, 25, 0, 0, 0).getTime(); // 2026/8/25
+// TODO（之後資料量多了再做）：橫軸縮放/平移，參考 TradingView 那種手勢——現在 tMin/tMax 是單純
+// 「epoch 到現在」算出來的，之後要加縮放的話，改成讓使用者手勢決定一組可視範圍、覆蓋掉這裡的
+// 預設算法即可，xAt/yAt 這兩個轉換函式不用大改，主要是 tMin/tMax 這兩個值的來源要換掉。
+
 function renderAssetHistoryChart(a) {
   const svg = document.getElementById("assetHistSvg");
   const tip = document.getElementById("assetHistTooltip");
   if (!svg) return;
 
-  const snaps = (assetSnapshotHistory[a.id] || []).map(p => ({ t:p.t, v:p.v }));
-  const events = (assetEventHistory[a.id] || []).slice().sort((x,y)=>x.t-y.t);
+  const snaps = (assetSnapshotHistory[a.id] || []).map(p => ({ t:p.t, v:p.v })).filter(p => p.t >= ASSET_HISTORY_EPOCH);
+  const events = (assetEventHistory[a.id] || []).slice().filter(e => e.t >= ASSET_HISTORY_EPOCH).sort((x,y)=>x.t-y.t);
   const liveV = valueOf(a);
   const now = Date.now();
 
-  // 資料點：每週快照 + 現在的即時值。這是資產自己的專屬視角，重點是走勢跟事件對應關係，
-  // 不像主圖表那麼講究「已定案 vs 還在累積」的區分，所以直接合併成一條連續線。
-  const points = [...snaps, { t: now, v: liveV }].sort((x,y)=>x.t-y.t);
-
-  if (points.length < 2 && events.length === 0) {
-    svg.innerHTML = `<text x="170" y="95" fill="#5b616e" font-size="12" text-anchor="middle">還沒有足夠的歷史資料</text>`;
-    assetHistLayout = null;
-    if (tip) tip.style.display = "none";
-    return;
-  }
+  // 資料點：epoch 之後的每週快照 + 事件當下的金額 + 現在的即時值，全部一起排時間序連成線。
+  // 事件（轉入/轉出/編輯）本來就有精確到當下那一刻的金額，直接當成線上的點，不只是疊加的標記——
+  // 這樣只要這個資產有在動，線就會比只靠週五快照密很多，愈常操作、線愈細緻。
+  const eventPts = events.filter(e => e.value != null).map(e => ({ t:e.t, v:e.value }));
+  const points = [...snaps, ...eventPts, { t: now, v: liveV }].sort((x,y)=>x.t-y.t);
 
   const W=340, H=190, padL=44, padR=14, padT=16, padB=26;
   const plotW=W-padL-padR, plotH=H-padT-padB;
 
-  const allTimes = [...points.map(p=>p.t), ...events.map(e=>e.t)];
-  const tMin = Math.min(...allTimes);
+  const tMin = ASSET_HISTORY_EPOCH;
   const tMax = now;
-  const tSpan = Math.max(tMax-tMin, 24*3600*1000); // 避免只有一天資料時除以 0
+  const tSpan = Math.max(tMax-tMin, 24*3600*1000); // 避免今天就是 epoch 當天時除以 0
 
   let maxVal = 0;
   points.forEach(p=>{ if(p.v>maxVal) maxVal=p.v; });
@@ -1132,9 +1135,29 @@ function renderAssetHistoryChart(a) {
     axisSvg += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="#20222b" stroke-width="1"/>`;
     axisSvg += `<text x="${padL-6}" y="${(y+3).toFixed(1)}" fill="#5b616e" font-size="9" text-anchor="end">${netWorthHidden?"•••":formatAxisNum(tv)}</text>`;
   });
+  // X 軸：精確到每一天的刻度，不是只有頭尾兩個日期。天數少（一週內）就每天都標；
+  // 天數變多之後自動拉開間隔（最多標 7 個左右），避免日期擠成一團看不清楚。
   const fmtDate = t => { const d=new Date(t); return `${d.getMonth()+1}/${d.getDate()}`; };
-  axisSvg += `<text x="${padL}" y="${H-6}" fill="#5b616e" font-size="9" text-anchor="start">${fmtDate(tMin)}</text>`;
-  axisSvg += `<text x="${W-padR}" y="${H-6}" fill="#5b616e" font-size="9" text-anchor="end">今天</text>`;
+  const totalDays = Math.max(1, Math.round(tSpan/(24*3600*1000)));
+  const dayStep = Math.max(1, Math.ceil(totalDays/7));
+  for (let d=0; d<=totalDays; d+=dayStep) {
+    const t = tMin + d*24*3600*1000;
+    if (t > tMax) break; // 不畫超過今天的刻度，避免把「明天」的日期文字誤標在「今天」的位置上
+    const x = xAt(t);
+    axisSvg += `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${H-padB}" stroke="#1a1c23" stroke-width="1"/>`;
+    axisSvg += `<text x="${x.toFixed(1)}" y="${H-6}" fill="#5b616e" font-size="9" text-anchor="middle">${fmtDate(t)}</text>`;
+  }
+  // 最右邊「今天」的刻度，不管有沒有剛好落在上面的間隔上，一定要標出來
+  if ((totalDays % dayStep) !== 0) {
+    axisSvg += `<text x="${(W-padR).toFixed(1)}" y="${H-6}" fill="#5b616e" font-size="9" text-anchor="end">今天</text>`;
+  }
+
+  if (points.length < 2 && events.length === 0) {
+    svg.innerHTML = axisSvg + `<text x="170" y="${padT+plotH/2}" fill="#5b616e" font-size="12" text-anchor="middle">從今天開始累積，之後回來看就有走勢了</text>`;
+    assetHistLayout = { W, H, padL, padR, padT, padB, tMin, tMax, tSpan, maxVal, xAt, yAt, points, events, asset:a };
+    if (tip) tip.style.display = "none";
+    return;
+  }
 
   // 折線本身
   const pts = points.map(p=>[xAt(p.t), yAt(p.v)]);
