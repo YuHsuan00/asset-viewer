@@ -1757,21 +1757,33 @@ async function commitTransfer(fromAsset, toAsset, fromAmt, toAmt) {
 }
 
 
-// ── 淨值變化指標：跟過去某個時間點（優先抓 7 天前）比較漲跌 ──
-// 資料不夠久（例如剛開始蒐集歷史）時，不硬凹說「較上週」，改成老實顯示「較 X 天前」。
+// ── 淨值變化指標：跟「上週五」比較漲跌 ──
+// 這裡故意跟下面主圖表用同一套「週五對齊」基準（見 buildWeeklySeries），
+// 不要自己另外拿「整整 7 天前」當基準——兩套基準常常不是同一天，資料有變動時
+// （例如刪除一筆資產修正了某天的淨值）很容易出現「這裡說漲、下面圖表說跌」的矛盾，
+// 對不上的不是資產本身，是兩處拿了不同天的參考點在比較。統一之後兩邊永遠會是同一個答案。
+// 資料不夠久（連上週五都還沒有資料）時，不硬凹說「較上週」，改成老實顯示「較 X 天前」。
 function renderNetWorthChange() {
   const el = document.getElementById("nwChange");
   if (!el) return;
   if (!history.length) { el.innerHTML = ""; return; }
-  const now = Date.now();
-  const targetT = now - 7*24*3600*1000;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dow = today.getDay();
+  // 找「上一個週五」，就算今天剛好是週五，也要往前多推一週，不要抓到「今天自己」——
+  // 不然今天是週五時，這裡會變成在跟「今天」比較，比出來的天數趨近於 0，沒有意義。
+  let daysSinceFriday = (dow - 5 + 7) % 7;
+  if (daysSinceFriday === 0) daysSinceFriday = 7;
+  const lastFriday = new Date(today); lastFriday.setDate(today.getDate() - daysSinceFriday);
+  const cutoff = new Date(lastFriday.getFullYear(), lastFriday.getMonth(), lastFriday.getDate(), 23,59,59,999).getTime();
+
   let ref = null;
-  history.forEach(h => { if (h.t <= targetT && (!ref || h.t > ref.t)) ref = h; });
-  let usedDays = 7;
+  history.forEach(h => { if (h.t <= cutoff && (!ref || h.t > ref.t)) ref = h; });
+  let usedDays = null; // null 代表「有找到上週五（或更早）的資料」，直接講「較上週」，不用湊天數
   if (!ref) {
     ref = history.reduce((a,b)=> a.t < b.t ? a : b);
-    usedDays = Math.max(1, Math.round((now - ref.t)/(24*3600*1000)));
-    if (ref.t >= now - 12*3600*1000) { el.innerHTML = ""; return; } // 唯一一筆資料就是現在，還沒有可比較的過去，先不顯示
+    usedDays = Math.max(1, Math.round((now.getTime() - ref.t)/(24*3600*1000)));
+    if (ref.t >= now.getTime() - 12*3600*1000) { el.innerHTML = ""; return; } // 唯一一筆資料就是現在，還沒有可比較的過去，先不顯示
   }
   const refVal = ref.v;
   const cur = netWorth();
@@ -1781,11 +1793,13 @@ function renderNetWorthChange() {
   const up = diff >= 0;
   const arrow = up ? "▲" : "▼";
   const color = up ? "#3ecf8e" : "#f16a6a";
-  const label = usedDays===7 ? "較上週" : `較${usedDays}天前`;
+  const label = usedDays===null ? "較上週" : `較${usedDays}天前`;
   const pctText = `${up?"+":""}${pct.toFixed(1)}%`;
   const diffText = netWorthHidden ? "" : ` (${up?"+":""}${nf(diff)})`;
   el.innerHTML = `<span style="color:${color}">${arrow} ${pctText}</span><span style="color:#5b616e">${diffText} ${label}</span>`;
 }
+
+
 
 // ── 全部重繪 ──
 function renderAll(animate=true) {
