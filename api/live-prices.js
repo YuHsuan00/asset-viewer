@@ -22,7 +22,8 @@ const COINGECKO_IDS = {
   LINK:"chainlink", AVAX:"avalanche-2", SHIB:"shiba-inu", LTC:"litecoin",
   UNI:"uniswap", ATOM:"cosmos", XLM:"stellar", NEAR:"near",
   APT:"aptos", ARB:"arbitrum", OP:"optimism", PEPE:"pepe",
-  SUI:"sui", TON:"the-open-network", BCH:"bitcoin-cash"
+  SUI:"sui", TON:"the-open-network", BCH:"bitcoin-cash",
+  XAUT:"tether-gold", PAXG:"pax-gold"
 };
 
 const FALLBACK_USD_TWD = 32; // 匯率抓不到時的保底值
