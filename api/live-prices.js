@@ -23,7 +23,7 @@ const COINGECKO_IDS = {
   UNI:"uniswap", ATOM:"cosmos", XLM:"stellar", NEAR:"near",
   APT:"aptos", ARB:"arbitrum", OP:"optimism", PEPE:"pepe",
   SUI:"sui", TON:"the-open-network", BCH:"bitcoin-cash",
-  XAUT:"tether-gold", PAXG:"pax-gold"
+  XAUT:"tether-gold"
 };
 
 const FALLBACK_USD_TWD = 32; // 匯率抓不到時的保底值
