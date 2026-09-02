@@ -17,7 +17,7 @@ async function logAssetEvent(SUPABASE_URL, headers, assetId, assetName, type, { 
     await fetch(`${SUPABASE_URL}/rest/v1/asset_events`, {
       method: "POST", headers,
       body: JSON.stringify({
-        asset_id: assetId, asset_name: assetName, type, delta,
+        asset_id: assetId, asset_name: assetName, type, source: "recurring", delta,
         value_at_time: valueAtTime, counterparty_id: counterpartyId, counterparty_name: counterpartyName,
       }),
     });
