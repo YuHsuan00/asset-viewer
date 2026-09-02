@@ -111,6 +111,13 @@
   .target-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
   .target-btn { display: flex; align-items: center; gap: 8px; border: 1.5px solid #23252e; background: #16181f; color: #a7adb8; border-radius: 12px; padding: 9px 13px; font-size: 14px; cursor: pointer; transition: all .12s; }
   .target-btn:active { transform: scale(.96); }
+  .target-cat-group { border: 1.5px solid #23252e; border-radius: 12px; margin-bottom: 8px; overflow: hidden; }
+  .target-cat-header { width: 100%; display: flex; align-items: center; gap: 8px; background: #16181f; color: #d7dae0; border: none; padding: 11px 13px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .target-cat-header .target-cat-count { margin-left: auto; color: #5b616e; font-size: 12px; font-weight: 500; }
+  .target-cat-header .chev { transition: transform .15s; flex-shrink: 0; }
+  .target-cat-header.open .chev { transform: rotate(180deg); }
+  .target-cat-items { display: none; flex-wrap: wrap; gap: 8px; padding: 4px 10px 10px; }
+  .target-cat-items.open { display: flex; }
   .day-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 4px; }
   .day-btn { aspect-ratio: 1; border: 1.5px solid #23252e; background: #16181f; color: #a7adb8; border-radius: 9px; font-size: 13px; font-variant-numeric: tabular-nums; cursor: pointer; transition: all .12s; }
   .day-btn.on { border-color: #5b8def; background: #5b8def33; color: #fff; font-weight: 700; }
@@ -2047,28 +2054,56 @@ function openAdjust(id) {
   const tToLabel = sheet.querySelector("#tToLabel");
   const transferBtn = sheet.querySelector("#transferBtn");
 
-  assets.filter(x=>x.id!==id).forEach(other=>{
-    const btn=document.createElement("button");
-    btn.className="target-btn";
-    btn.innerHTML=`<span class="swatch" style="background:${other.color}"></span><span>${other.name}</span>`;
-    btn.onclick=()=>{
-      transferTarget = other;
-      transferTargetList.querySelectorAll(".target-btn").forEach(b=>{
-        b.style.borderColor=""; b.style.background=""; b.style.color="";
-      });
-      btn.style.borderColor = other.color;
-      btn.style.background = other.color+"22";
-      btn.style.color = "#fff";
-      const otherIsCash = other.cat==="cash";
-      const otherCashWhole = otherIsCash && isWholeCurrency(currencyOf(other));
-      const otherIsWhole = isWholeShareCat(other.cat);
-      const otherUnit = otherIsCash ? CURRENCIES[currencyOf(other)].label : CATEGORIES[other.cat].unit;
-      tToLabel.textContent = `轉入「${other.name}」數量（${otherUnit}${otherIsWhole?"，整股":""}）`;
-      tTo.setAttribute("inputmode", (otherCashWhole||otherIsWhole) ? "numeric" : "decimal");
-      tToField.style.display = "block";
-      checkTransferReady();
+  // 轉出目標依分類分組、預設收合成手風琴——資產一多，攤平列出來很佔空間，
+  // 分組之後平常只看到 4 個分類標題，點開才展開該分類底下的資產，同時間只開一組（手風琴），節省畫面空間。
+  const selectTarget = (other, btn) => {
+    transferTarget = other;
+    transferTargetList.querySelectorAll(".target-btn").forEach(b=>{
+      b.style.borderColor=""; b.style.background=""; b.style.color="";
+    });
+    btn.style.borderColor = other.color;
+    btn.style.background = other.color+"22";
+    btn.style.color = "#fff";
+    const otherIsCash = other.cat==="cash";
+    const otherCashWhole = otherIsCash && isWholeCurrency(currencyOf(other));
+    const otherIsWhole = isWholeShareCat(other.cat);
+    const otherUnit = otherIsCash ? CURRENCIES[currencyOf(other)].label : CATEGORIES[other.cat].unit;
+    tToLabel.textContent = `轉入「${other.name}」數量（${otherUnit}${otherIsWhole?"，整股":""}）`;
+    tTo.setAttribute("inputmode", (otherCashWhole||otherIsWhole) ? "numeric" : "decimal");
+    tToField.style.display = "block";
+    checkTransferReady();
+  };
+
+  GROUP_ORDER.forEach(cat=>{
+    const list = assets.filter(x=>x.id!==id && x.cat===cat);
+    if (!list.length) return;
+    const group = document.createElement("div");
+    group.className = "target-cat-group";
+    const header = document.createElement("button");
+    header.className = "target-cat-header";
+    header.type = "button";
+    header.innerHTML = `<span class="swatch" style="background:${getPalette(cat)[0]}"></span><span>${CATEGORIES[cat].label}</span><span class="target-cat-count">${list.length}</span>
+      <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
+    const itemsWrap = document.createElement("div");
+    itemsWrap.className = "target-cat-items";
+    list.forEach(other=>{
+      const btn=document.createElement("button");
+      btn.className="target-btn";
+      btn.type="button";
+      btn.innerHTML=`<span class="swatch" style="background:${other.color}"></span><span>${other.name}</span>`;
+      btn.onclick=()=>selectTarget(other, btn);
+      itemsWrap.appendChild(btn);
+    });
+    header.onclick = () => {
+      const willOpen = !header.classList.contains("open");
+      // 手風琴：先把其他組收起來，同時間只展開一組，畫面才不會又變長
+      transferTargetList.querySelectorAll(".target-cat-header").forEach(h=>h.classList.remove("open"));
+      transferTargetList.querySelectorAll(".target-cat-items").forEach(w=>w.classList.remove("open"));
+      if (willOpen) { header.classList.add("open"); itemsWrap.classList.add("open"); }
     };
-    transferTargetList.appendChild(btn);
+    group.appendChild(header);
+    group.appendChild(itemsWrap);
+    transferTargetList.appendChild(group);
   });
 
   function checkTransferReady(){
@@ -2538,7 +2573,7 @@ const USSTOCK_PROXY_URL = "/api/usstock";
 
 async function fetchCryptoPrices() {
   const cryptos = assets.filter(a => a.cat === "crypto");
-  if (!cryptos.length) return { ok:0, fail:0, err:null };
+  if (!cryptos.length) return { ok:0, fail:0, err:null, failedNames:[] };
   const idMap = {};
   cryptos.forEach(a => {
     const id = COINGECKO_IDS[(a.symbol||"").toUpperCase()] || (a.symbol||"").toLowerCase();
@@ -2582,16 +2617,17 @@ async function fetchCryptoPrices() {
     catch(e) { lastErr = e; }
   }
 
-  let ok=0, fail=0;
+  let ok=0, fail=0, failedNames=[];
   if (out) {
     Object.entries(idMap).forEach(([id, list]) => {
       if (out[id]) { list.forEach(a => a.price = out[id]); ok += list.length; }
-      else fail += list.length;
+      else { fail += list.length; failedNames.push(...list.map(a=>a.name)); }
     });
   } else {
     fail = cryptos.length;
+    failedNames = cryptos.map(a=>a.name);
   }
-  return { ok, fail, err: out ? null : (lastErr ? lastErr.message : "全部來源失敗") };
+  return { ok, fail, err: out ? null : (lastErr ? lastErr.message : "全部來源失敗"), failedNames };
 }
 
 // 抓目前 USD/TWD 匯率：借用 CoinGecko 的 USDT 報價當代理（USDT 跟美元 1:1 掛鉤），
@@ -2632,34 +2668,35 @@ async function fetchFxRates() {
 }
 
 async function fetchTWStockPrices() {
-  if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true, err:null };
+  if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true, err:null, failedNames:[] };
   const stocks = assets.filter(a => a.cat === "stock_tw");
-  if (!stocks.length) return { ok:0, fail:0, err:null };
+  if (!stocks.length) return { ok:0, fail:0, err:null, failedNames:[] };
   const codes = stocks.map(a => a.symbol).join(",");
-  let ok=0, fail=0, err=null;
+  let ok=0, fail=0, err=null, failedNames=[];
   try {
     const res = await fetch(`${TWSTOCK_PROXY_URL}?codes=${encodeURIComponent(codes)}`);
     if (!res.ok) throw new Error("代理 HTTP "+res.status);
     const data = await res.json(); // 預期格式：{ "0050": 108.25, ... }
     stocks.forEach(a => {
       if (data[a.symbol]) { a.price = data[a.symbol]; ok++; }
-      else fail++;
+      else { fail++; failedNames.push(a.name); }
     });
     if (fail>0 && ok===0) err = "證交所無回應資料（可能休市或代號錯誤）";
   } catch(e) {
     fail = stocks.length;
+    failedNames = stocks.map(a=>a.name);
     err = e.message;
     console.warn("台股股價抓取失敗:", e.message);
   }
-  return { ok, fail, err };
+  return { ok, fail, err, failedNames };
 }
 
 async function fetchUSStockPrices() {
-  if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true, err:null };
+  if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true, err:null, failedNames:[] };
   const stocks = assets.filter(a => a.cat === "stock_us");
-  if (!stocks.length) return { ok:0, fail:0, err:null };
+  if (!stocks.length) return { ok:0, fail:0, err:null, failedNames:[] };
   const codes = stocks.map(a => a.symbol).join(",");
-  let ok=0, fail=0, err=null;
+  let ok=0, fail=0, err=null, failedNames=[];
   try {
     const [res, usdtwd] = await Promise.all([
       fetch(`${USSTOCK_PROXY_URL}?codes=${encodeURIComponent(codes)}`),
@@ -2669,15 +2706,16 @@ async function fetchUSStockPrices() {
     const data = await res.json(); // 預期格式：{ "AAPL": 150.5, ... }（美元）
     stocks.forEach(a => {
       if (data[a.symbol]) { a.price = data[a.symbol] * usdtwd; ok++; } // 換算成台幣再存
-      else fail++;
+      else { fail++; failedNames.push(a.name); }
     });
     if (fail>0 && ok===0) err = "Stooq 無回應資料（可能休市或代號錯誤）";
   } catch(e) {
     fail = stocks.length;
+    failedNames = stocks.map(a=>a.name);
     err = e.message;
     console.warn("美股股價抓取失敗:", e.message);
   }
-  return { ok, fail, err };
+  return { ok, fail, err, failedNames };
 }
 
 // 把剛抓到的即時價寫回 Supabase 的 assets.price。
@@ -2734,7 +2772,11 @@ async function refreshPrices(silent=false) {
       status.textContent = `價格更新於 ${hh}:${mm}`;
       status.style.color = "#5b616e";
     } else if (totalOk>0) {
-      status.textContent = `已更新 ${totalOk} 項，${totalFail} 項失敗`;
+      const failedNames = [...c.failedNames, ...tw.failedNames, ...us.failedNames];
+      const namesText = failedNames.length<=3
+        ? failedNames.join("、")
+        : `${failedNames.slice(0,3).join("、")} 等${failedNames.length}項`;
+      status.textContent = `已更新 ${totalOk} 項，${totalFail} 項失敗（${namesText}）`;
       status.style.color = "#e8804a";
     } else {
       // 全失敗：顯示原因，多半是 file:// 開啟或被限流
