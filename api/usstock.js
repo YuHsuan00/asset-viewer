@@ -11,9 +11,13 @@
 // ⚠️ 2026/09 補充：以前是 Promise.all 讓所有股票的 Yahoo 請求「同一瞬間」一起發出去，
 // 持股檔數變多之後（例如新增第 4、5 檔），這種瞬間爆量的請求模式比總量本身更容易被 Yahoo
 // 判定成異常流量、擋掉其中幾檔——不是「檔數太多」的問題，是「太多檔同時間一起打」的問題。
-// 改成每檔錯開一點點時間再發（stagger），總延遲增加得很少，但爆量的尖峰被拉平了。
+// 一開始改成「每檔錯開 120ms 依序發」，能解決爆量問題，但檔數一多、使用者會感覺明顯變慢
+// （例如 4 檔，最後一檔要等 360ms 才發得出去，加上它自己的來回時間）。
+// 改成「兩檔一組，組跟組之間錯開」：尖峰同時間最多 2 檔在跑（還是比原本 4-5 檔同時衝出去安全很多），
+// 但總延遲大約只有全部依序發的一半，兼顧「不要被擋」跟「不要太慢」。
 
-const YAHOO_STAGGER_MS = 120; // 每一檔跟上一檔之間至少錯開這麼多毫秒才發出請求
+const BATCH_SIZE = 2;       // 同一時間最多幾檔一起發
+const BATCH_STAGGER_MS = 90; // 這一組跟下一組之間錯開多久才發
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
   const controller = new AbortController();
@@ -39,9 +43,8 @@ export default async function handler(req, res) {
   const list = codes.split(",").map(c => c.trim().toUpperCase()).filter(Boolean);
   const out = {};
 
-  // ── 來源 1：Yahoo Finance（每檔各自查，一檔逾時/失敗不影響其他檔；發出請求的時間點錯開） ──
-  await Promise.all(list.map(async (sym, i) => {
-    if (i > 0) await sleep(i * YAHOO_STAGGER_MS); // 第一檔立刻發，之後每一檔依序再多等一點
+  // ── 來源 1：Yahoo Finance（兩檔一組發送，組跟組之間錯開一點時間，同組內一檔失敗不影響其他檔） ──
+  const fetchOne = async (sym) => {
     try {
       const r = await fetchWithTimeout(
         `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}`,
@@ -53,7 +56,11 @@ export default async function handler(req, res) {
       const price = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
       if (typeof price === "number" && !isNaN(price)) out[sym] = price;
     } catch (e) { /* 逾時或失敗：這檔交給下面 Stooq 補 */ }
-  }));
+  };
+  for (let i = 0; i < list.length; i += BATCH_SIZE) {
+    if (i > 0) await sleep(BATCH_STAGGER_MS);
+    await Promise.all(list.slice(i, i+BATCH_SIZE).map(fetchOne));
+  }
 
   // ── 來源 2：Stooq 補漏（只查 Yahoo 沒查到的，減少請求量） ──
   const missing = list.filter(s => out[s] === undefined);
