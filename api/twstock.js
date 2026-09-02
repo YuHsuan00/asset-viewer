@@ -44,6 +44,27 @@ async function queryTwse(exCh, cookie) {
   return out;
 }
 
+// 備援來源：Yahoo Finance 也查得到台股，代號後面加 .TW（上市）或 .TWO（上櫃）就行，
+// 跟美股用的是同一套 Yahoo API。證交所那邊查不到的（不管是真的沒資料還是又不穩了）才補查這裡，
+// 兩個來源互補，不是取代——證交所還是主要來源，Yahoo 只在證交所漏接時頂上。
+async function queryYahoo(codes) {
+  const out = {};
+  await Promise.all(codes.map(async (code) => {
+    const suffix = code.startsWith("6") ? ".TWO" : ".TW";
+    try {
+      const r = await fetchWithTimeout(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(code+suffix)}`,
+        { headers: { "User-Agent": "Mozilla/5.0" } }, 5000
+      );
+      if (!r.ok) return;
+      const d = await r.json();
+      const price = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
+      if (typeof price === "number" && !isNaN(price)) out[code] = price;
+    } catch (e) { /* 這檔還是查不到就算了，留給呼叫端用舊價格 */ }
+  }));
+  return out;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET");
@@ -53,9 +74,10 @@ export default async function handler(req, res) {
   const buildCh = (code) => (code.startsWith("6") ? "otc" : "tse") + "_" + code + ".tw";
   const exCh = list.map(buildCh).join("|");
 
+  let out = {};
   try {
     const cookie = await getTwseSessionCookie();
-    let out = await queryTwse(exCh, cookie);
+    out = await queryTwse(exCh, cookie);
     // 拿到的檔數比要求的少：可能是那次 session 沒生效，重試一次（帶新的 session），
     // 只有真的不齊全才會多這一次來回，平常一次就齊全的情況完全不受影響、不會變慢
     if (Object.keys(out).length < list.length) {
@@ -63,9 +85,20 @@ export default async function handler(req, res) {
       const out2 = await queryTwse(exCh, cookie2);
       out = { ...out, ...out2 }; // 兩次的結果合併，能查到的就算數
     }
-    res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=60");
-    return res.status(200).json(out);
-  } catch (e) {
-    return res.status(502).json({ error: "抓取失敗", detail: e.message });
+  } catch (e) { /* 證交所這條路完全失敗，交給下面 Yahoo 頂上，這裡不用直接回錯誤 */ }
+
+  // 證交所（含重試）還是有缺，才查 Yahoo 補——平常證交所就齊全的話，完全不會多這次請求
+  const missing = list.filter(c => out[c] === undefined);
+  if (missing.length) {
+    try {
+      const fromYahoo = await queryYahoo(missing);
+      out = { ...out, ...fromYahoo };
+    } catch (e) { /* Yahoo 也失敗，這幾檔就留給呼叫端用舊價格頂著 */ }
   }
+
+  if (Object.keys(out).length === 0) {
+    return res.status(502).json({ error: "抓取失敗", detail: "證交所跟 Yahoo 兩個來源都查不到資料" });
+  }
+  res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=60");
+  return res.status(200).json(out);
 }
