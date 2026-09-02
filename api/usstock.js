@@ -7,6 +7,13 @@
 // 重點：每個對外請求都設有時間上限（AbortController），避免對方（Yahoo/Stooq）
 // 不回應或拖著不回時，這支程式被卡住等到 Vercel 平台自己的執行逾時、被強制中斷回傳 502。
 // 有這層保險後，最壞情況也只是「這個來源沒查到」，不會讓整支程式掛掉。
+//
+// ⚠️ 2026/09 補充：以前是 Promise.all 讓所有股票的 Yahoo 請求「同一瞬間」一起發出去，
+// 持股檔數變多之後（例如新增第 4、5 檔），這種瞬間爆量的請求模式比總量本身更容易被 Yahoo
+// 判定成異常流量、擋掉其中幾檔——不是「檔數太多」的問題，是「太多檔同時間一起打」的問題。
+// 改成每檔錯開一點點時間再發（stagger），總延遲增加得很少，但爆量的尖峰被拉平了。
+
+const YAHOO_STAGGER_MS = 120; // 每一檔跟上一檔之間至少錯開這麼多毫秒才發出請求
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
   const controller = new AbortController();
@@ -17,6 +24,8 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
     clearTimeout(timer);
   }
 }
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -30,8 +39,9 @@ export default async function handler(req, res) {
   const list = codes.split(",").map(c => c.trim().toUpperCase()).filter(Boolean);
   const out = {};
 
-  // ── 來源 1：Yahoo Finance（每檔各自查，一檔逾時/失敗不影響其他檔） ──
-  await Promise.all(list.map(async (sym) => {
+  // ── 來源 1：Yahoo Finance（每檔各自查，一檔逾時/失敗不影響其他檔；發出請求的時間點錯開） ──
+  await Promise.all(list.map(async (sym, i) => {
+    if (i > 0) await sleep(i * YAHOO_STAGGER_MS); // 第一檔立刻發，之後每一檔依序再多等一點
     try {
       const r = await fetchWithTimeout(
         `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}`,
