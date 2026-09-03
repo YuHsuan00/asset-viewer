@@ -39,6 +39,58 @@
     padding-bottom: calc(28px + env(safe-area-inset-bottom));
   }
   .wrap { padding: 0 16px; }               /* 左右安全邊距 */
+
+  /* ── 右滑出現的第二頁：資產分類圓餅圖 ── */
+  #riskPageTab {
+    position: fixed; right: 0; top: 50%; transform: translateY(-50%);
+    width: 22px; height: 64px; border: none; border-radius: 10px 0 0 10px;
+    background: #1c1e26; color: #6b7280; display: flex; align-items: center; justify-content: center;
+    z-index: 55; padding: 0; cursor: pointer;
+  }
+  #riskPage {
+    position: fixed; inset: 0; z-index: 60; background: #0b0c10;
+    display: flex; justify-content: center;
+    transform: translateX(100%);
+    transition: transform .3s cubic-bezier(.22,.61,.36,1);
+    overflow-y: auto; -webkit-overflow-scrolling: touch;
+  }
+  #riskPage.open { transform: translateX(0); }
+  .risk-page-inner {
+    width: 100%; max-width: 393px;
+    padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right);
+    padding-bottom: calc(28px + env(safe-area-inset-bottom));
+  }
+  .risk-page-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 30px 16px 10px;
+  }
+  #riskPageClose {
+    display: flex; align-items: center; gap: 2px; background: none; border: none;
+    color: #a7adb8; font-size: 15px; padding: 4px; cursor: pointer;
+  }
+  .risk-page-title { font-size: 15px; font-weight: 700; color: #e8eaed; }
+  #riskPieWrap { padding: 8px 16px 4px; display: flex; justify-content: center; }
+  #riskPieSvg { width: 220px; height: 220px; }
+  #riskLegend { padding: 8px 16px 24px; }
+  .risk-legend-group { border: 1.5px solid #23252e; border-radius: 12px; margin-bottom: 8px; overflow: hidden; }
+  .risk-legend-head {
+    width: 100%; display: flex; align-items: center; gap: 9px; background: #16181f; color: #d7dae0;
+    border: none; padding: 12px 13px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .risk-legend-head .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .risk-legend-head .amt { margin-left: auto; text-align: right; font-variant-numeric: tabular-nums; }
+  .risk-legend-head .amt .pct { display: block; font-size: 11px; color: #5b616e; font-weight: 500; }
+  .risk-legend-head .chev { transition: transform .15s; flex-shrink: 0; color: #5b616e; }
+  .risk-legend-head.open .chev { transform: rotate(90deg); }
+  .risk-legend-items { display: none; padding: 2px 10px 10px; }
+  .risk-legend-items.open { display: block; }
+  .risk-legend-item {
+    display: flex; align-items: center; gap: 9px; padding: 8px 3px; cursor: pointer;
+    border-bottom: 1px solid #1a1c23; font-size: 13px; color: #c8ccd4;
+  }
+  .risk-legend-item:last-child { border-bottom: none; }
+  .risk-legend-item .swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+  .risk-legend-item .amt { margin-left: auto; color: #8a94a6; font-variant-numeric: tabular-nums; font-size: 12.5px; }
   .topbar {
     display: flex; justify-content: space-between; align-items: flex-start;
     padding: 30px 16px 18px;
@@ -249,6 +301,27 @@
   </div>
 </div>
 
+<!-- 右滑出現的第二頁：資產分類圓餅圖（虛擬貨幣/股票/現金/其他，可在編輯面板裡自訂每筆資產屬於哪組） -->
+<button id="riskPageTab" title="右滑或點這裡看資產分類圓餅圖">
+  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+</button>
+<div id="riskPage">
+  <div class="risk-page-inner">
+    <div class="risk-page-head">
+      <button id="riskPageClose" title="關閉">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        <span>返回</span>
+      </button>
+      <span class="risk-page-title">資產分類</span>
+      <span style="width:52px"></span>
+    </div>
+    <div id="riskPieWrap">
+      <svg id="riskPieSvg" viewBox="0 0 200 200"></svg>
+    </div>
+    <div id="riskLegend"></div>
+  </div>
+</div>
+
 <script>
 // ── 類別定義 ──
 // 8 組精選主題色系，每組 6 階漸層。類別套用某個主題後，
@@ -286,6 +359,24 @@ const CURRENCIES = {
   AUD: { label: "澳幣", symbol: "A$",  quick: [50,100,500,1000] },
 };
 function currencyOf(a) { return a.currency || "TWD"; }
+
+// 「圓餅圖分類」：跟記帳用的四大分類（銀行帳戶/虛擬貨幣/台股/美股）是完全獨立的第二套分類，
+// 用途是給使用者自己判斷「這筆資產風險/流動性上比較像什麼」，可以跟記帳分類不一樣——
+// 例如 OKX U 記帳上是虛擬貨幣，但使用者可能覺得它（穩定幣）風險上比較像現金，可以自己覆寫。
+// 沒有手動設定過的資產，用 defaultRiskGroup() 從記帳分類推一個預設值，使用者選過之後才會存 a.riskGroup。
+const RISK_GROUPS = {
+  crypto: { label: "虛擬貨幣", color: "#f18322" },
+  stock:  { label: "股票",     color: "#2e74e5" },
+  cash:   { label: "現金",     color: "#3ad98f" },
+  other:  { label: "其他",     color: "#9b7be0" },
+};
+function defaultRiskGroup(cat) {
+  if (cat === "cash") return "cash";
+  if (cat === "crypto") return "crypto";
+  if (cat === "stock_tw" || cat === "stock_us") return "stock";
+  return "other";
+}
+function riskGroupOf(a) { return a.riskGroup || defaultRiskGroup(a.cat); }
 // 台幣、日圓平常記帳習慣不記到小數（日圓本來就沒有比 1 圓更小的單位），維持整數輸入；
 // 其他幣別（美元、歐元…）通常會有角/分，允許輸入小數。
 function isWholeCurrency(cur) { return cur === "TWD" || cur === "JPY"; }
@@ -352,6 +443,7 @@ async function loadFromCloud() {
       assets = data.map((r,i) => ({
         id: r.id, cat: r.cat, name: r.name, color: r.color,
         order: r.sort_order!=null ? Number(r.sort_order) : i,
+        riskGroup: r.risk_group || null, // null 代表沒被覆寫過，用 defaultRiskGroup(cat) 推算
         ...(r.cat==="cash" ? { balance: Number(r.balance)||0, currency: r.currency || "TWD" }
                            : { qty: Number(r.qty)||0, price: Number(r.price)||0, symbol: r.symbol||"" })
       }));
@@ -366,28 +458,35 @@ async function loadFromCloud() {
 
 // 把單一資產寫回雲端（upsert）
 // 防呆（跟 saveNetWorthSnapshot 的 breakdown 欄位一樣的手法）：先試著連 currency 一起存，
-// 如果 Supabase 那邊 assets 表還沒 alter table 加這個欄位，整筆 upsert 會失敗——
-// 這時候自動退回「不帶 currency」重存一次，至少其他欄位（餘額、名稱…）不會被這個新欄位拖累存不進去。
+// 如果 Supabase 那邊 assets 表還沒 alter table 加這些欄位，整筆 upsert 會失敗——
+// 這時候自動退回「不帶新欄位」重存一次，至少其他欄位（餘額、名稱…）不會被這些新欄位拖累存不進去。
+// 用「一層一層拿掉新欄位再試」的方式，不管缺哪一個（或兩個都缺）都能自己找到能成功的組合。
 async function saveAssetToCloud(a) {
   if (!cloudOn()) return;
   const payload = {
     id: a.id, cat: a.cat, name: a.name, color: a.color,
     balance: a.cat==="cash" ? a.balance : null,
     currency: a.cat==="cash" ? (a.currency || "TWD") : null,
+    risk_group: a.riskGroup || null,
     qty: a.cat!=="cash" ? a.qty : null,
     price: a.cat!=="cash" ? a.price : null,
     symbol: a.symbol || null,
     sort_order: a.order ?? 0
   };
-  try {
-    const { error } = await sb.from("assets").upsert(payload);
-    if (error) throw error;
-  } catch(e) {
-    console.warn("雲端儲存失敗（可能是 currency 欄位還沒建，改用舊格式重存一次）:", e.message);
+  const attempts = [
+    payload,
+    (() => { const { risk_group, ...p } = payload; return p; })(),
+    (() => { const { currency, risk_group, ...p } = payload; return p; })(),
+  ];
+  for (let i=0; i<attempts.length; i++) {
     try {
-      const { currency, ...fallback } = payload;
-      await sb.from("assets").upsert(fallback);
-    } catch(e2) { console.warn("雲端儲存仍然失敗:", e2.message); }
+      const { error } = await sb.from("assets").upsert(attempts[i]);
+      if (error) throw error;
+      return; // 成功就結束，不用再試更少欄位的版本
+    } catch(e) {
+      if (i === attempts.length-1) console.warn("雲端儲存仍然失敗:", e.message);
+      else console.warn(`雲端儲存失敗（可能是新欄位還沒建，改用更少欄位重存一次 ${i+1}/${attempts.length-1}）:`, e.message);
+    }
   }
 }
 
@@ -1978,6 +2077,11 @@ function openAdjust(id) {
       <div class="field"><div class="field-label">名稱</div>
         <input class="sm-input" id="eName" value="${a.name}"></div>
       ${editFields}
+      <div class="field"><div class="field-label">圓餅圖分類（右滑「資產分類」頁用，跟記帳分類分開設定）</div>
+        <select class="sm-input" id="eRiskGroup">
+          ${Object.entries(RISK_GROUPS).map(([key,g])=>`<option value="${key}" ${key===riskGroupOf(a)?"selected":""}>${g.label}${key===defaultRiskGroup(a.cat)?"（預設）":""}</option>`).join("")}
+        </select>
+      </div>
       <div class="field"><div class="field-label">顏色（${CATEGORIES[a.cat].label}色系）</div>
         <div class="color-swatch-row" id="colorRow">
           ${getPalette(a.cat).map(c=>`<button class="color-swatch ${c===a.color?'on':''}" data-color="${c}" style="background:${c}"></button>`).join("")}
@@ -2191,6 +2295,8 @@ function openAdjust(id) {
       if(p!=="") a.price=Math.max(0,Number(p));
     }
     a.color = pendingColor;
+    const rg = sheet.querySelector("#eRiskGroup").value;
+    a.riskGroup = (rg && rg !== defaultRiskGroup(a.cat)) ? rg : null; // 選回預設值就當作沒覆寫過，維持自動跟隨
     saveBtnEl.disabled=true; saveBtnEl.textContent="儲存中…";
     const afterVal = valueOf(a);
     await commit(a, { event: Math.abs(afterVal-beforeVal)>0.01 ? { type:"edit", delta:afterVal-beforeVal } : null });
@@ -2541,6 +2647,127 @@ eyeBtn.onclick = () => {
   renderAll(false); // 重新渲染整個畫面（方塊、組成清單、圖表），讓所有地方的金額同步隱藏／顯示
 };
 document.getElementById("refreshBtn").onclick=()=>refreshPrices(false);
+
+// ── 右滑第二頁：資產分類圓餅圖 ──
+function polarToXY(cx, cy, r, angleDeg) {
+  const rad = (angleDeg-90) * Math.PI/180;
+  return { x: cx + r*Math.cos(rad), y: cy + r*Math.sin(rad) };
+}
+function describeDonutArc(cx, cy, rOuter, rInner, startAngle, endAngle) {
+  const so = polarToXY(cx,cy,rOuter,endAngle), eo = polarToXY(cx,cy,rOuter,startAngle);
+  const si = polarToXY(cx,cy,rInner,endAngle), ei = polarToXY(cx,cy,rInner,startAngle);
+  const largeArc = endAngle-startAngle <= 180 ? 0 : 1;
+  return `M${so.x.toFixed(2)} ${so.y.toFixed(2)} A${rOuter} ${rOuter} 0 ${largeArc} 0 ${eo.x.toFixed(2)} ${eo.y.toFixed(2)} L${ei.x.toFixed(2)} ${ei.y.toFixed(2)} A${rInner} ${rInner} 0 ${largeArc} 1 ${si.x.toFixed(2)} ${si.y.toFixed(2)} Z`;
+}
+
+// 把資產依「圓餅圖分類」（不是記帳分類）分組加總。沒有任何資產的組別不畫，
+// 避免使用者從沒手動選過「其他」時，圖表跟圖例平白多一個永遠是 0 的空分類。
+function computeRiskGroups() {
+  const buckets = { crypto:[], stock:[], cash:[], other:[] };
+  assets.forEach(a => { buckets[riskGroupOf(a)].push(a); });
+  const nw = netWorth();
+  return Object.keys(RISK_GROUPS)
+    .map(key => {
+      const list = buckets[key];
+      const value = list.reduce((s,a)=>s+valueOf(a),0);
+      return { key, label: RISK_GROUPS[key].label, color: RISK_GROUPS[key].color, list, value, pct: nw>0 ? value/nw*100 : 0 };
+    })
+    .filter(g => g.list.length>0);
+}
+
+function renderRiskPage() {
+  const svg = document.getElementById("riskPieSvg");
+  const legend = document.getElementById("riskLegend");
+  if (!svg || !legend) return;
+  const groups = computeRiskGroups();
+  const nw = netWorth();
+  if (!groups.length || nw<=0) {
+    svg.innerHTML = "";
+    legend.innerHTML = `<div class="note-sm" style="text-align:center;padding:24px 0">還沒有資產可以分類</div>`;
+    return;
+  }
+
+  const cx=100, cy=100, rOuter=90, rInner=56;
+  let angle = 0;
+  let pieSvg = "";
+  groups.forEach(g => {
+    const sweep = Math.min(g.pct/100*360, 359.99); // 封頂避免唯一一組佔 100% 時頭尾同點畫不出弧形
+    if (sweep <= 0) return;
+    pieSvg += `<path d="${describeDonutArc(cx,cy,rOuter,rInner,angle,angle+sweep)}" fill="${g.color}"/>`;
+    angle += sweep;
+  });
+  pieSvg += `<text x="${cx}" y="${cy-6}" fill="#5b616e" font-size="10" text-anchor="middle">總資產</text>`;
+  pieSvg += `<text x="${cx}" y="${cy+15}" fill="#e8eaed" font-size="16" font-weight="700" text-anchor="middle">${netWorthHidden?"•••••":nf(nw)}</text>`;
+  svg.innerHTML = pieSvg;
+
+  legend.innerHTML = "";
+  groups.slice().sort((a,b)=>b.value-a.value).forEach(g => {
+    const group = document.createElement("div");
+    group.className = "risk-legend-group";
+    const header = document.createElement("button");
+    header.className = "risk-legend-head";
+    header.type = "button";
+    header.innerHTML = `<span class="dot" style="background:${g.color}"></span><span>${g.label}</span>
+      <span class="amt">${netWorthHidden?"•••••":mnf(g.value)}<span class="pct">${g.pct.toFixed(1)}%</span></span>
+      <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>`;
+    const itemsWrap = document.createElement("div");
+    itemsWrap.className = "risk-legend-items";
+    g.list.slice().sort((a,b)=>valueOf(b)-valueOf(a)).forEach(a=>{
+      const item = document.createElement("div");
+      item.className = "risk-legend-item";
+      item.innerHTML = `<span class="swatch" style="background:${a.color}"></span><span>${a.name}</span><span class="amt">${netWorthHidden?"•••":mnf(valueOf(a))}</span>`;
+      // 點子項目：先收合右滑頁，等滑動動畫做完再開該資產的編輯面板——可以直接在那裡改「圓餅圖分類」
+      item.onclick = () => { closeRiskPage(); setTimeout(()=>openAdjust(a.id), 300); };
+      itemsWrap.appendChild(item);
+    });
+    header.onclick = () => {
+      const willOpen = !header.classList.contains("open");
+      legend.querySelectorAll(".risk-legend-head").forEach(h=>h.classList.remove("open"));
+      legend.querySelectorAll(".risk-legend-items").forEach(w=>w.classList.remove("open"));
+      if (willOpen) { header.classList.add("open"); itemsWrap.classList.add("open"); }
+    };
+    group.appendChild(header);
+    group.appendChild(itemsWrap);
+    legend.appendChild(group);
+  });
+}
+
+let riskPageOpen = false;
+function openRiskPage() {
+  if (riskPageOpen) return;
+  riskPageOpen = true;
+  renderRiskPage();
+  document.getElementById("riskPage").classList.add("open");
+}
+function closeRiskPage() {
+  riskPageOpen = false;
+  document.getElementById("riskPage").classList.remove("open");
+}
+document.getElementById("riskPageTab").onclick = openRiskPage;
+document.getElementById("riskPageClose").onclick = closeRiskPage;
+
+// 右滑手勢：用「觸摸起點～終點」的位移判斷，不是即時跟手拖曳——比較單純穩定，
+// 也不會跟現有的垂直捲動衝突（沒有呼叫 preventDefault，捲動完全不受影響）。
+// 手勢起點如果在圖表（有自己的水平拖曳查值功能）、輸入框、下拉選單裡，就不當成翻頁手勢，避免互相搶手勢。
+(function setupSwipeGesture(){
+  const IGNORE_SELECTORS = "#sparkline, #assetHistSvg, .tile, input, select, .overlay";
+  let startX=0, startY=0, tracking=false, ignore=false;
+  document.body.addEventListener("touchstart", (e)=>{
+    if (e.touches.length!==1) { tracking=false; return; }
+    ignore = !!e.target.closest(IGNORE_SELECTORS);
+    startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+    tracking = true;
+  }, { passive:true });
+  document.body.addEventListener("touchend", (e)=>{
+    if (!tracking || ignore) { tracking=false; return; }
+    tracking = false;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - startX, dy = t.clientY - startY;
+    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy)*1.5) return; // 不夠水平、不夠長，不算翻頁手勢
+    if (!riskPageOpen && dx > 0) openRiskPage();
+    else if (riskPageOpen && dx < 0) closeRiskPage();
+  }, { passive:true });
+})();
 
 const ungroupedBtn = document.getElementById("ungroupedBtn");
 ungroupedBtn.classList.toggle("on", ungroupedView);
