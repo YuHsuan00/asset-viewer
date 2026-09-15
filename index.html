@@ -1296,25 +1296,18 @@ function renderAssetHistoryChart(a) {
   // 這樣這條線會跟主線一樣隨行情起伏，但只反映定期定額累積出來的那一小塊，不含你手動操作的部分。
   // 現金類資產沒有單價可用（weekly-snapshot.js 對現金一律存 price=null），這條線在那種資產上不會出現。
   const recurringEvents = events.filter(e => e.source==="recurring").sort((x,y)=>x.t-y.t);
-  let dcaSvg = "";
-  if (recurringEvents.length) {
-    const cumQtyAt = (t) => recurringEvents.reduce((s,e)=> e.t<=t ? s + (e.type==="sell" ? -(e.delta||0) : (e.delta||0)) : s, 0);
-    const pricedPoints = []; // 只用真的有單價可查的時間點
-    snaps.forEach(p => { if (p.price!=null && p.price>0) pricedPoints.push({ t:p.t, price:p.price }); });
-    const nowPrice = a.cat!=="cash" ? Number(a.price||0) : null; // 現金沒有「單價」這個概念，不畫這條線
-    if (nowPrice>0) pricedPoints.push({ t: now, price: nowPrice });
-    pricedPoints.sort((x,y)=>x.t-y.t);
-    const dcaPts = pricedPoints
-      .map(p => ({ t:p.t, v: cumQtyAt(p.t) * p.price }))
-      .filter(p => p.v > 0); // 定期定額還沒執行過的時間點（累積量是 0）不畫，線從第一次執行才開始出現
-    if (dcaPts.length >= 2) {
-      const dPts = dcaPts.map(p=>[xAt(p.t), yAt(p.v)]);
-      const dcaColor = "#a78bfa"; // 用跟主線不同的紫色，一眼分得出哪條是哪條
-      dcaSvg += `<path d="${smoothPath(dPts)}" fill="none" stroke="${dcaColor}" stroke-width="2" stroke-dasharray="5,3" stroke-linecap="round" stroke-opacity="0.85"/>`;
-      const lastD = dPts[dPts.length-1];
-      dcaSvg += `<circle cx="${lastD[0].toFixed(1)}" cy="${lastD[1].toFixed(1)}" r="3" fill="${dcaColor}"/>`;
-    }
-  }
+  const recurringQtyAt = t => recurringEvents.reduce(
+    (s,e) => e.t<=t ? s + (e.type==="sell" ? -Number(e.delta||0) : Number(e.delta||0)) : s, 0
+  );
+  const dcaValueAt = t => {
+    if (a.cat==="cash") return null;
+    const qty = recurringQtyAt(t);
+    if (!(qty>0)) return null;
+    let price = null;
+    snaps.forEach(p => { if (p.t<=t && p.price!=null && p.price>0) price=Number(p.price); });
+    if (t>=now-60000 && Number(a.price||0)>0) price=Number(a.price);
+    return price>0 ? qty*price : null;
+  };
 
   // 事件標記：B(買進/轉入)=綠、S(賣出/轉出)=紅、E(編輯)=黃，畫在對應時間點、對應金額的高度上。
   // 只標「手動操作」的事件——定期定額那些已經改用上面那條專屬子線呈現整體累積趨勢，
@@ -1346,9 +1339,9 @@ function renderAssetHistoryChart(a) {
     markerSvg += `<text x="${c.x.toFixed(1)}" y="${(y+3.5).toFixed(1)}" fill="#0e0f13" font-size="9" font-weight="800" text-anchor="middle">${label}</text>`;
   });
 
-  svg.innerHTML = axisSvg + lineSvg + dcaSvg + markerSvg + `<g id="assetHistScrubLayer"></g>`;
+  svg.innerHTML = axisSvg + lineSvg + markerSvg + `<g id="assetHistScrubLayer"></g>`;
 
-  assetHistLayout = { W, H, padL, padR, padT, padB, tMin, tMax, tSpan, maxVal, xAt, yAt, points, events, asset:a };
+  assetHistLayout = { W, H, padL, padR, padT, padB, tMin, tMax, tSpan, maxVal, xAt, yAt, points, events, dcaValueAt, asset:a };
 
   if (!svg.dataset.wired) {
     svg.dataset.wired = "1";
@@ -1366,7 +1359,7 @@ function updateAssetHistScrub(clientX) {
   if (!svg || !tip) return;
   const rect = svg.getBoundingClientRect();
   if (!rect.width) return;
-  const { W, padL, padR, padT, H, padB, tMin, tSpan, points, asset } = assetHistLayout;
+  const { W, padL, padR, padT, H, padB, tMin, tSpan, points, asset, dcaValueAt } = assetHistLayout;
   const relX = (clientX-rect.left)/rect.width*W;
   const plotW = W-padL-padR;
   const frac = Math.max(0, Math.min(1, (relX-padL)/plotW));
@@ -1389,8 +1382,11 @@ function updateAssetHistScrub(clientX) {
     <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5" fill="${asset.color}" stroke="#0e0f13" stroke-width="1.5"/>`;
 
   const d = new Date(nearest.t);
+  const dcaValue = typeof dcaValueAt==="function" ? dcaValueAt(nearest.t) : null;
+  const dcaPct = dcaValue!=null && nearest.v>0 ? dcaValue/nearest.v*100 : null;
   tip.innerHTML = `<div style="font-size:10px;color:#5b616e;margin-bottom:3px">${d.getMonth()+1}/${d.getDate()}</div>
     <div style="font-size:13px;font-weight:700;color:#e8eaed">${mnf(nearest.v)}</div>
+    ${dcaValue!=null?`<div style="font-size:11px;color:#a78bfa">其中定期定額 ${mnf(dcaValue)} · ${dcaPct.toFixed(1)}%</div>`:""}
     ${pct!=null?`<div style="font-size:11px;color:#8a94a6">佔淨資產 ${pct.toFixed(1)}%</div>`:""}`;
   tip.style.display="block";
   tip.style.top="4px"; tip.style.bottom="auto";
@@ -1870,14 +1866,16 @@ function pushHistory() {
 // 固定寫 manual；伺服器排程那邊（run-recurring.js）另外自己標成 recurring。
 // 這是全新的資料表，從這個版本開始才有紀錄，之前的異動沒有留下痕跡、補不回來。
 // 寫入失敗不該擋住資產本身的異動（那才是主要的事），所以這裡永遠不 throw，只記警告。
-async function logAssetEvent(assetId, type, { delta=null, valueAtTime=null, counterpartyId=null, counterpartyName=null, assetName=null } = {}) {
+async function logAssetEvent(assetId, type, { delta=null, valueAtTime=null, counterpartyId=null, counterpartyName=null, assetName=null, source="manual", createdAt=null } = {}) {
   if (!cloudOn()) return;
   try {
-    await sb.from("asset_events").insert({
-      asset_id: assetId, asset_name: assetName, type, source: "manual",
+    const payload = {
+      asset_id: assetId, asset_name: assetName, type, source,
       delta, value_at_time: valueAtTime,
       counterparty_id: counterpartyId, counterparty_name: counterpartyName,
-    });
+    };
+    if (createdAt) payload.created_at = createdAt;
+    await sb.from("asset_events").insert(payload);
   } catch(e) { console.warn("交易紀錄寫入失敗（不影響資產本身的異動）:", e.message); }
 }
 
@@ -2105,7 +2103,7 @@ function openAdjust(id) {
         <div class="chart-tooltip" id="assetHistTooltip" style="display:none"></div>
       </div>
       <div class="note-sm" id="assetHistLegend" style="margin-top:6px">
-        <span style="color:#3ecf8e;font-weight:700">B</span> 買進/轉入　<span style="color:#f16a6a;font-weight:700">S</span> 賣出/轉出　<span style="color:#e8c74a;font-weight:700">E</span> 編輯（只標手動操作）　<span style="color:#a78bfa;font-weight:700">┄</span> 定期定額累積部位　－　按住線圖可查看當時金額與佔淨資產比例
+        <span style="color:#3ecf8e;font-weight:700">B</span> 買進/轉入　<span style="color:#f16a6a;font-weight:700">S</span> 賣出/轉出　<span style="color:#e8c74a;font-weight:700">E</span> 編輯（只標手動操作）　－　按住線圖可查看當時金額、定期定額部位與佔淨資產比例
       </div>
     </div>
 
@@ -3094,11 +3092,22 @@ async function runDueRecurringRules() {
         const ds = dateStr(cursor);
         const claimed = await claimRecurringRule(rule, ds);
         if (claimed) {
-          applyRecurringOccurrence(rule, from, to); // 上面已確認價格可用，這裡不會失敗
+          const fromBefore = from.cat==="cash" ? Number(from.balance||0) : Number(from.qty||0);
+          const toBefore = to.cat==="cash" ? Number(to.balance||0) : Number(to.qty||0);
+          const applied = applyRecurringOccurrence(rule, from, to);
+          if (!applied) continue;
+          const fromAfter = from.cat==="cash" ? Number(from.balance||0) : Number(from.qty||0);
+          const toAfter = to.cat==="cash" ? Number(to.balance||0) : Number(to.qty||0);
+          const fromDelta = Math.max(0, fromBefore-fromAfter);
+          const toDelta = Math.max(0, toAfter-toBefore);
+          const occurredAt = new Date(ds+"T12:00:00").toISOString();
           rule.last_run_date = ds;
           anyExecuted = true;
-          await saveAssetToCloud(from);
-          await saveAssetToCloud(to);
+          await Promise.all([
+            saveAssetToCloud(from), saveAssetToCloud(to),
+            logAssetEvent(from.id, "sell", { delta:fromDelta, valueAtTime:valueOf(from), assetName:from.name, counterpartyId:to.id, counterpartyName:to.name, source:"recurring", createdAt:occurredAt }),
+            logAssetEvent(to.id, "buy", { delta:toDelta, valueAtTime:valueOf(to), assetName:to.name, counterpartyId:from.id, counterpartyName:from.name, source:"recurring", createdAt:occurredAt }),
+          ]);
         } else {
           // 搶輸了：這天其實已經被 Cron（或別的裝置）執行過了，不重複扣款，
           // 只同步本地這條規則的 last_run_date，讓後續判斷繼續往下一天走
