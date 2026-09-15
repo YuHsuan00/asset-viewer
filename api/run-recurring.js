@@ -176,7 +176,7 @@ export default async function handler(req, res) {
     }
 
     // 順手把即時價寫回 assets.price，讓資料庫的價格不再長期過期
-    const pricesWritten = await writeBackPrices(livePrices, { supabaseUrl: SUPABASE_URL, headers });
+    const pricesWritten = await writeBackPrices(livePrices, { supabaseUrl: SUPABASE_URL, headers, assetList });
 
     return res.status(200).json({
       ok: true, checkedRules: rules.length, executed,

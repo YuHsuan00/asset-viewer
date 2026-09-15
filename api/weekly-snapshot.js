@@ -102,7 +102,7 @@ export default async function handler(req, res) {
     if (!nwRes.ok) console.warn("補記分類明細快照失敗（不影響資產快照本身）:", nwRes.status);
 
     // 順手把即時價寫回 assets.price，讓資料庫的價格不再長期過期（失敗不影響上面已完成的快照）
-    const pricesWritten = await writeBackPrices(livePrices, { supabaseUrl: SUPABASE_URL, headers });
+    const pricesWritten = await writeBackPrices(livePrices, { supabaseUrl: SUPABASE_URL, headers, assetList });
 
     return res.status(200).json({
       ok: true, recorded: rows.length, date: todayStr,

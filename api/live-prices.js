@@ -27,6 +27,7 @@ const COINGECKO_IDS = {
 };
 
 const FALLBACK_USD_TWD = 32; // 匯率抓不到時的保底值
+const FALLBACK_FX = { TWD:1, USD:32, JPY:0.21, CNY:4.5, EUR:35, HKD:4.1, GBP:41, AUD:21 };
 
 // 每個對外請求都設時間上限，避免對方不回應時把整支 Cron 卡到平台逾時被強制中斷
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -49,6 +50,26 @@ export async function getUsdTwdRate() {
     }
   } catch (e) { /* 用保底匯率 */ }
   return FALLBACK_USD_TWD;
+}
+
+// 銀行帳戶：balance 是原幣金額，回傳 1 原幣可換多少台幣。
+async function fetchCashFxPrices(cashAssets) {
+  const out = {};
+  if (!cashAssets.length) return out;
+  const nonTwd = [...new Set(cashAssets.map(a=>(a.currency||"TWD").toUpperCase()).filter(c=>c!=="TWD"))];
+  const rates = { ...FALLBACK_FX, TWD:1 };
+  if (nonTwd.length) {
+    try {
+      const codes=nonTwd.map(c=>c.toLowerCase());
+      const r=await fetchWithTimeout(`https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=twd,${codes.join(",")}`);
+      if (r.ok) {
+        const t=(await r.json())?.tether;
+        if (t?.twd) codes.forEach(c=>{ if(t[c]) rates[c.toUpperCase()]=t.twd/t[c]; });
+      }
+    } catch(e) { /* 維持保底匯率 */ }
+  }
+  cashAssets.forEach(a=>{ const cur=(a.currency||"TWD").toUpperCase(); out[a.id]=Number(rates[cur]??1); });
+  return out;
 }
 
 // 加密貨幣：CoinGecko，先試直接回台幣，失敗再試「美元 × 匯率」
@@ -131,29 +152,37 @@ async function fetchUSStockPrices(stockAssets, baseUrl) {
 // 主要進入點：回傳 { assetId: 台幣單價 }。抓不到的資產不會出現在回傳結果裡，
 // 呼叫端要自行決定要 fallback 回 assets.price 還是跳過。
 export async function fetchLivePrices(assetList, { baseUrl } = {}) {
+  const cash = assetList.filter(a => a.cat === "cash");
   const crypto = assetList.filter(a => a.cat === "crypto");
   const twStock = assetList.filter(a => a.cat === "stock_tw");
   const usStock = assetList.filter(a => a.cat === "stock_us");
 
-  // 三類同時抓，其中一類失敗不影響其他類
-  const [c, tw, us] = await Promise.all([
+  // 四類同時抓，其中一類失敗不影響其他類
+  const [fx, c, tw, us] = await Promise.all([
+    fetchCashFxPrices(cash),
     fetchCryptoPrices(crypto),
     fetchTWStockPrices(twStock, baseUrl),
     fetchUSStockPrices(usStock, baseUrl),
   ]);
-  return { ...c, ...tw, ...us };
+  return { ...fx, ...c, ...tw, ...us };
 }
 
-// 算單一資產的台幣市值：現金直接看 balance；其他用「即時價優先、抓不到才退回資料庫存的 price」
+// 算單一資產的台幣市值：現金 balance 是原幣金額，必須乘當時匯率。
 export function valueOfAsset(a, livePrices = {}) {
-  if (a.cat === "cash") return Number(a.balance || 0);
+  if (a.cat === "cash") {
+    const cur=(a.currency||"TWD").toUpperCase();
+    return Number(a.balance||0)*Number(livePrices[a.id]??FALLBACK_FX[cur]??1);
+  }
   const unit = livePrices[a.id] ?? Number(a.price || 0);
   return Number(a.qty || 0) * Number(unit || 0);
 }
 
 // 算單一資產的台幣單價（同上，供定期定額換算數量用）
 export function unitPriceOf(a, livePrices = {}) {
-  if (a.cat === "cash") return 1;
+  if (a.cat === "cash") {
+    const cur=(a.currency||"TWD").toUpperCase();
+    return Number(livePrices[a.id]??FALLBACK_FX[cur]??1);
+  }
   return Number(livePrices[a.id] ?? a.price ?? 0);
 }
 
@@ -169,8 +198,9 @@ export function getBaseUrl(req) {
 
 // 把抓到的即時價寫回 assets.price，讓資料庫的價格不再長期過期。
 // 這是「順手更新」性質，失敗不該影響主要流程，所以錯誤只記 log 不往外拋。
-export async function writeBackPrices(livePrices, { supabaseUrl, headers }) {
-  const entries = Object.entries(livePrices);
+export async function writeBackPrices(livePrices, { supabaseUrl, headers, assetList=[] }) {
+  const nonCashIds=new Set(assetList.filter(a=>a.cat!=="cash").map(a=>String(a.id)));
+  const entries=Object.entries(livePrices).filter(([id])=>!assetList.length||nonCashIds.has(String(id)));
   if (!entries.length) return 0;
   let written = 0;
   await Promise.all(entries.map(async ([assetId, price]) => {
