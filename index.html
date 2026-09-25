@@ -39,6 +39,19 @@
     padding-bottom: calc(28px + env(safe-area-inset-bottom));
   }
   .wrap { padding: 0 16px; }               /* 左右安全邊距 */
+  #fundingAlert {
+    display: none; margin: calc(14px + env(safe-area-inset-top)) 16px 0;
+    padding: 12px 12px 12px 13px; border: 1px solid #704228;
+    border-radius: 14px; background: linear-gradient(135deg,#2a1d17,#201719);
+    box-shadow: 0 8px 24px rgba(0,0,0,.28); gap: 10px; align-items: flex-start;
+  }
+  #fundingAlert.show { display: flex; animation: alertDrop .3s cubic-bezier(.22,.8,.35,1); }
+  .funding-alert-icon { color: #f0a35d; font-size: 17px; line-height: 20px; flex-shrink: 0; }
+  .funding-alert-body { min-width: 0; flex: 1; }
+  .funding-alert-title { color: #ffd2aa; font-size: 13px; font-weight: 750; margin-bottom: 5px; }
+  .funding-alert-line { color: #c7a991; font-size: 11.5px; line-height: 1.55; }
+  #fundingAlertClose { border: none; background: transparent; color: #8f7565; font-size: 20px; line-height: 18px; padding: 0 1px 4px 6px; cursor: pointer; }
+  @keyframes alertDrop { from { opacity:0; transform:translateY(-8px); } to { opacity:1; transform:translateY(0); } }
 
   /* ── 右滑出現的第二頁：資產分類圓餅圖（從左邊滑入，跟往右滑的手勢方向一致） ── */
   #riskPage {
@@ -242,6 +255,14 @@
 </head>
 <body>
 <div id="app">
+  <div id="fundingAlert" role="alert" aria-live="polite">
+    <div class="funding-alert-icon">⚠</div>
+    <div class="funding-alert-body">
+      <div class="funding-alert-title">未來 14 天定期定額資金不足</div>
+      <div id="fundingAlertLines"></div>
+    </div>
+    <button id="fundingAlertClose" type="button" aria-label="關閉提醒">×</button>
+  </div>
   <div class="topbar">
     <div>
       <div class="eyebrow">淨資產 TWD</div>
@@ -374,10 +395,13 @@ function isWholeCurrency(cur) { return cur === "TWD" || cur === "JPY"; }
 // 匯率快取：{ 幣別代碼: 1單位換算成多少台幣 }，由 fetchFxRates() 定期更新（見即時價那段）。
 // 抓不到即時匯率時先用這組保底值墊著，不會讓外幣帳戶的淨值整個算不出來。
 let fxRates = { TWD:1, USD:32, JPY:0.21, CNY:4.5, EUR:35, HKD:4.1, GBP:41, AUD:21 };
+// 股票報價真正所屬的交易日（assetId -> YYYY-MM-DD）。休市仍可能拿得到前一日收盤價，
+// 定期定額必須同時檢查這個日期，不能只因為「有價格」就當成今天有開市。
+let marketDateByAsset = {};
 function fxRateOf(cur) { return fxRates[cur] ?? 1; }
 
-// 台股、美股都只能持有整數股（不像加密貨幣可以有小數顆），這裡統一判斷（roundQty 實際捨去邏輯見下方既有函式）
-function isWholeShareCat(cat) { return cat === "stock_tw" || cat === "stock_us"; }
+// 台股維持整股；美股帳戶支援碎股，因此美股數量可以有小數。
+function isWholeShareCat(cat) { return cat === "stock_tw"; }
 
 const GROUP_ORDER = ["cash","crypto","stock_tw","stock_us"];
 const OTHER_COLOR = "#4b515c";
@@ -676,6 +700,60 @@ async function loadCategoryLayouts() {
 
 // ── 定期定額 ──
 let recurringRules = [];
+let fundingAlertDismissed = false;
+
+function upcomingRecurringFundingShortages(nowDate=new Date()) {
+  const start = new Date(nowDate); start.setHours(0,0,0,0);
+  const scheduledCounts = new Map();
+
+  // 未來 14 個日曆日（含今天）。休市順延不會取消原指定日，因此仍應先保留這筆預算。
+  for (const rule of recurringRules) {
+    if (!rule.active) continue;
+    const from = assets.find(a=>a.id===rule.from_id);
+    if (!from || from.cat!=="cash") continue;
+    let count = 0;
+    for (let i=0;i<14;i++) {
+      const d=addDays(start,i), ds=dateStr(d);
+      if ((rule.days_of_month||[]).includes(d.getDate()) && (!rule.last_run_date || ds>rule.last_run_date)) count++;
+    }
+    if (!count) continue;
+
+    const cur = currencyOf(from);
+    const usesSourceCurrency = rule.amount_source!=null && rule.amount_currency &&
+      String(rule.amount_currency).toUpperCase()===cur && cur!=="TWD";
+    const perOccurrence = usesSourceCurrency
+      ? Number(rule.amount_source)
+      : Number(rule.amount_twd||0) / Math.max(0.00000001, fxRateOf(cur));
+    if (!(perOccurrence>0)) continue;
+    const current = scheduledCounts.get(from.id) || { asset:from, needed:0, occurrences:0 };
+    current.needed += perOccurrence*count;
+    current.occurrences += count;
+    scheduledCounts.set(from.id,current);
+  }
+
+  return [...scheduledCounts.values()].filter(x=>x.needed>Number(x.asset.balance||0)+0.000001);
+}
+
+function formatFundingMoney(cur, value) {
+  const digits = isWholeCurrency(cur) ? 0 : 2;
+  return `${CURRENCIES[cur]?.symbol || cur} ${Number(value||0).toLocaleString("zh-TW",{minimumFractionDigits:digits,maximumFractionDigits:digits})}`;
+}
+
+function renderFundingAlert() {
+  const box=document.getElementById("fundingAlert"), lines=document.getElementById("fundingAlertLines");
+  if (!box || !lines) return;
+  const shortages=upcomingRecurringFundingShortages();
+  if (!shortages.length || fundingAlertDismissed) { box.classList.remove("show"); return; }
+  lines.replaceChildren(...shortages.map(x=>{
+    const cur=currencyOf(x.asset), balance=Number(x.asset.balance||0), gap=x.needed-balance;
+    const row=document.createElement("div"); row.className="funding-alert-line";
+    row.textContent = netWorthHidden
+      ? `${x.asset.name}：未來有 ${x.occurrences} 筆扣款，帳戶餘額不足`
+      : `${x.asset.name}：${x.occurrences} 筆需 ${formatFundingMoney(cur,x.needed)}，目前 ${formatFundingMoney(cur,balance)}，還差 ${formatFundingMoney(cur,gap)}`;
+    return row;
+  }));
+  box.classList.add("show");
+}
 
 async function loadRecurringRules() {
   if (!cloudOn()) return false;
@@ -692,7 +770,10 @@ async function saveRecurringRule(rule) {
   try {
     await sb.from("recurring_transfers").upsert({
       id: rule.id, from_id: rule.from_id, to_id: rule.to_id,
-      amount_twd: rule.amount_twd, days_of_month: rule.days_of_month, active: rule.active,
+      amount_twd: rule.amount_twd,
+      amount_source: rule.amount_source ?? null,
+      amount_currency: rule.amount_currency ?? null,
+      days_of_month: rule.days_of_month, active: rule.active,
       last_run_date: rule.last_run_date || null,
     });
   } catch(e) { console.warn("定期定額儲存失敗:", e.message); }
@@ -725,12 +806,12 @@ const nf = n => Math.round(n).toLocaleString();
 // 百分比、持有數量(顆/股)不算「金額」，維持照常顯示。
 const mnf = n => netWorthHidden ? "•••••" : nf(n);
 
-// 台股、美股的持股單位是「整股」，不會有小數股；加密貨幣則本來就可以有小數。
+// 台股持股單位維持整股；美股與加密貨幣允許小數。
 // 統一在這裡處理，任何會改到 qty 的地方都要經過這個函式，確保不會出現 8.3 股這種不存在的持股狀態。
 // 股票無條件捨去（不是四捨五入）：這樣「定期定額」按預算換算股數時，實際花費一定不超過設定的投入金額。
 function roundQty(value, cat) {
   const v = Math.max(0, value);
-  return (cat === "stock_tw" || cat === "stock_us") ? Math.floor(v) : +v.toFixed(8);
+  return cat === "stock_tw" ? Math.floor(v) : +v.toFixed(8);
 }
 
 // 在 oninput 裡把使用者輸入濾成純數字（或數字+一個小數點）時，用這個函式，不要直接 el.value=...replace(...)。
@@ -1968,6 +2049,7 @@ function renderAll(animate=true) {
   else { document.getElementById("networth").textContent = netWorthHidden ? "•••••••" : nf(nw); animatedNW=nw; }
   document.getElementById("subline").textContent = `${assets.length} 項資產`;
   renderNetWorthChange();
+  renderFundingAlert();
 }
 
 // ── 底部面板通用 ──
@@ -2496,12 +2578,16 @@ function openAdd() {
         const fromName = from ? from.name : "(已刪除)";
         const toName = to ? to.name : "(已刪除)";
         const daysTxt = (r.days_of_month||[]).slice().sort((a,b)=>a-b).map(d=>d+"號").join("、");
+        const usesSourceCurrency = r.amount_source!=null && r.amount_currency && r.amount_currency!=="TWD";
+        const amountText = usesSourceCurrency
+          ? `${CURRENCIES[r.amount_currency]?.symbol || r.amount_currency+" "}${nf(Number(r.amount_source))}`
+          : `${mnf(r.amount_twd)} 元`;
         return `<div class="rule-item" data-id="${r.id}" style="border:1.5px solid #23252e;border-radius:12px;padding:12px 14px;margin-bottom:8px;${r.active?'':'opacity:.5'}">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
             <span style="font-size:14px;font-weight:600;color:#e8eaed">${fromName} → ${toName}</span>
             <span style="font-size:11px;color:${r.active?'#3fb07a':'#6b7280'}">${r.active?'啟用中':'已暫停'}</span>
           </div>
-          <div style="font-size:12px;color:#8a94a6">每月 ${daysTxt}・每次投入 ${mnf(r.amount_twd)} 元（依執行當下即時價換算）</div>
+          <div style="font-size:12px;color:#8a94a6">每月 ${daysTxt}・每次投入 ${amountText}（依執行當下即時價換算）</div>
           <div style="display:flex;gap:8px;margin-top:8px">
             <button class="quick-btn rule-toggle" style="flex:1">${r.active?'暫停':'恢復'}</button>
             <button class="quick-btn rule-delete" style="flex:1;color:#d9645a">刪除</button>
@@ -2568,8 +2654,10 @@ function openAdd() {
       }
       const fromUnit = selFrom.cat==="cash" ? CURRENCIES[currencyOf(selFrom)].label : CATEGORIES[selFrom.cat].unit;
       const toUnit = selTo.cat==="cash" ? CURRENCIES[currencyOf(selTo)].label : CATEGORIES[selTo.cat].unit;
-      let toQty = amt/toUnitPrice;
-      if (isWholeShareCat(selTo.cat)) toQty = Math.floor(toQty); // 股票只能整股，多的錢不扣
+      const useSourceCurrency = selFrom.cat==="cash" && currencyOf(selFrom)!=="TWD";
+      const budgetTwd = useSourceCurrency ? amt*fromUnitPrice : amt;
+      let toQty = budgetTwd/toUnitPrice;
+      if (isWholeShareCat(selTo.cat)) toQty = Math.floor(toQty); // 台股只能整股，多的錢不扣；美股可買碎股
       const actualValue = toQty * toUnitPrice;
       let fromQty = actualValue/fromUnitPrice;
       if (isWholeShareCat(selFrom.cat)) fromQty = Math.floor(fromQty);
@@ -2578,7 +2666,16 @@ function openAdd() {
     }
 
     function updateLabel() {
-      ruleAmtLabel.textContent = "每次投入金額（台幣）";
+      if (selFrom?.cat==="cash" && currencyOf(selFrom)!=="TWD") {
+        const cur = currencyOf(selFrom);
+        ruleAmtLabel.textContent = `每次扣款金額（${CURRENCIES[cur].label} ${cur}）`;
+        ruleAmt.placeholder = CURRENCIES[cur].symbol+"0";
+        ruleAmt.inputMode = isWholeCurrency(cur) ? "numeric" : "decimal";
+      } else {
+        ruleAmtLabel.textContent = "每次投入金額（台幣）";
+        ruleAmt.placeholder = "0";
+        ruleAmt.inputMode = "numeric";
+      }
     }
 
     function check() {
@@ -2595,17 +2692,23 @@ function openAdd() {
       ruleAmt.value=""; ruleEstimate.textContent="";
       updateLabel();
       ruleForm.style.display="block";
-      buildAssetList(ruleFromList, (a)=>{ selFrom=a; check(); });
+      buildAssetList(ruleFromList, (a)=>{ selFrom=a; updateLabel(); check(); });
       buildAssetList(ruleToList, (a)=>{ selTo=a; check(); });
       buildDayGrid();
       check();
     };
 
     ruleSaveBtn.onclick=async ()=>{
+      const useSourceCurrency = selFrom.cat==="cash" && currencyOf(selFrom)!=="TWD";
+      const enteredAmount = Number(ruleAmt.value);
+      const sourceCurrency = useSourceCurrency ? currencyOf(selFrom) : null;
+      const estimatedTwd = useSourceCurrency ? enteredAmount*unitPriceOf(selFrom) : enteredAmount;
       const rule = {
         id: "r"+Date.now(),
         from_id: selFrom.id, to_id: selTo.id,
-        amount_twd: Number(ruleAmt.value),
+        amount_twd: estimatedTwd,
+        amount_source: useSourceCurrency ? enteredAmount : null,
+        amount_currency: sourceCurrency,
         days_of_month: Array.from(selDays).sort((a,b)=>a-b),
         active: true, last_run_date: null,
       };
@@ -2636,6 +2739,10 @@ eyeBtn.onclick = () => {
   renderAll(false); // 重新渲染整個畫面（方塊、組成清單、圖表），讓所有地方的金額同步隱藏／顯示
 };
 document.getElementById("refreshBtn").onclick=()=>refreshPrices(false);
+document.getElementById("fundingAlertClose").onclick=()=>{
+  fundingAlertDismissed=true;
+  document.getElementById("fundingAlert").classList.remove("show");
+};
 
 // ── 右滑第二頁：資產分類圓餅圖 ──
 function polarToXY(cx, cy, r, angleDeg) {
@@ -2896,7 +3003,11 @@ async function fetchTWStockPrices() {
     if (!res.ok) throw new Error("代理 HTTP "+res.status);
     const data = await res.json(); // 預期格式：{ "0050": 108.25, ... }
     stocks.forEach(a => {
-      if (data[a.symbol]) { a.price = data[a.symbol]; ok++; }
+      if (data[a.symbol]) {
+        a.price = data[a.symbol];
+        if (data.__marketDates?.[a.symbol]) marketDateByAsset[a.id] = data.__marketDates[a.symbol];
+        ok++;
+      }
       else { fail++; failedNames.push(a.name); }
     });
     if (fail>0 && ok===0) err = "證交所無回應資料（可能休市或代號錯誤）";
@@ -2923,7 +3034,11 @@ async function fetchUSStockPrices() {
     if (!res.ok) throw new Error("代理 HTTP "+res.status);
     const data = await res.json(); // 預期格式：{ "AAPL": 150.5, ... }（美元）
     stocks.forEach(a => {
-      if (data[a.symbol]) { a.price = data[a.symbol] * usdtwd; ok++; } // 換算成台幣再存
+      if (data[a.symbol]) {
+        a.price = data[a.symbol] * usdtwd;
+        if (data.__marketDates?.[a.symbol]) marketDateByAsset[a.id] = data.__marketDates[a.symbol];
+        ok++;
+      } // 換算成台幣再存
       else { fail++; failedNames.push(a.name); }
     });
     if (fail>0 && ok===0) err = "Stooq 無回應資料（可能休市或代號錯誤）";
@@ -2968,6 +3083,10 @@ async function refreshPrices(silent=false) {
   if (status && !silent) status.textContent = "更新價格中…";
 
   const [c, tw, us, fx] = await Promise.all([fetchCryptoPrices(), fetchTWStockPrices(), fetchUSStockPrices(), fetchFxRates()]);
+
+  // 股票是否開市要等報價回來後才知道；因此開機第一次抓價完成後再補跑一次。
+  // claimRecurringRule 會防止與 Cron 或前一次執行重複扣款。
+  await withTimeout(runDueRecurringRules(), 15000, "定期定額交易日補執行");
 
   // 抓到新價格就順手寫回雲端（手動按重新整理時強制寫，自動背景刷新則走節流）
   if (c.ok + tw.ok + us.ok > 0) writeBackPricesToCloud(!silent);
@@ -3038,7 +3157,7 @@ function dateStr(d) {
 function addDays(d, n) { const r=new Date(d); r.setDate(r.getDate()+n); return r; }
 
 // 執行一次定期定額的單一次扣款：固定投入金額（台幣），兩邊各自用「執行當下」的即時價換算成要扣/加多少數量。
-// 目標若是股票（台股/美股），只能買整股：先算出這筆錢最多能買到幾整股，再回推「實際花掉多少錢」，
+// 目標若是台股，只能買整股；美股支援碎股。台股會先算最多能買到幾整股，再回推實際花費，
 // 剩下湊不成一股的零頭不扣，留在來源帳戶。來源如果也是股票（少見的股票換股票），一樣不能有零股。
 // 回傳 true=成功執行、false=價格還沒抓到暫時無法換算（跳過這次，下次補執行時再試）
 function applyRecurringOccurrence(rule, from, to) {
@@ -3048,8 +3167,13 @@ function applyRecurringOccurrence(rule, from, to) {
     console.warn(`定期定額 ${rule.id} 因來源或目標尚無即時價格，暫時跳過這次執行`);
     return false;
   }
-  // 先算目標那邊：股票要整股（無條件捨去），現金/幣可以有小數
-  let toDelta = rule.amount_twd / toUnitPrice;
+  // 先算目標那邊：台股要整股（無條件捨去），美股／現金／幣可以有小數
+  const usesSourceCurrency = rule.amount_source!=null && rule.amount_currency &&
+    from.cat==="cash" && currencyOf(from)===rule.amount_currency && rule.amount_currency!=="TWD";
+  const budgetTwd = usesSourceCurrency
+    ? Number(rule.amount_source)*fromUnitPrice
+    : Number(rule.amount_twd);
+  let toDelta = budgetTwd / toUnitPrice;
   if (isWholeShareCat(to.cat)) toDelta = Math.floor(toDelta);
 
   // 用「目標實際買到的價值」反推來源要扣多少，這樣多的錢就不會被扣（留在來源帳戶）
@@ -3090,6 +3214,14 @@ async function runDueRecurringRules() {
     while (cursor <= today && safety < 400) {
       if ((rule.days_of_month||[]).includes(cursor.getDate())) {
         const ds = dateStr(cursor);
+        // 參照富邦：台／美股指定日未開市就不扣款，等報價的實際交易日期走到指定日之後才補買。
+        // 這能涵蓋週末、國定假日、颱風或臨時休市；舊收盤價不會被誤當成當日成交價。
+        if ((to.cat==="stock_tw" || to.cat==="stock_us") &&
+            (!marketDateByAsset[to.id] || marketDateByAsset[to.id] < ds)) {
+          cursor = addDays(cursor, 1);
+          safety++;
+          continue;
+        }
         const claimed = await claimRecurringRule(rule, ds);
         if (claimed) {
           const fromBefore = from.cat==="cash" ? Number(from.balance||0) : Number(from.qty||0);
@@ -3100,7 +3232,8 @@ async function runDueRecurringRules() {
           const toAfter = to.cat==="cash" ? Number(to.balance||0) : Number(to.qty||0);
           const fromDelta = Math.max(0, fromBefore-fromAfter);
           const toDelta = Math.max(0, toAfter-toBefore);
-          const occurredAt = new Date(ds+"T12:00:00").toISOString();
+          // 事件記實際成交時間；若原指定日休市，不把順延成交偽裝成休市日發生。
+          const occurredAt = new Date().toISOString();
           rule.last_run_date = ds;
           anyExecuted = true;
           await Promise.all([
