@@ -127,6 +127,9 @@ async function fetchTWStockPrices(stockAssets, baseUrl) {
     if (!r.ok) return out;
     const data = await r.json(); // { "0050": 108.25, ... }（台幣）
     stockAssets.forEach(a => { if (data[a.symbol]) out[a.id] = data[a.symbol]; });
+    const marketDates = {};
+    stockAssets.forEach(a=>{ if (data.__marketDates?.[a.symbol]) marketDates[a.id]=data.__marketDates[a.symbol]; });
+    Object.defineProperty(out, "__marketDates", { value:marketDates, enumerable:false });
   } catch (e) { /* 抓不到就留空 */ }
   return out;
 }
@@ -145,6 +148,9 @@ async function fetchUSStockPrices(stockAssets, baseUrl) {
     if (!r.ok) return out;
     const data = await r.json(); // { "GOOG": 150.5, ... }（美元）
     stockAssets.forEach(a => { if (data[a.symbol]) out[a.id] = data[a.symbol] * usdtwd; });
+    const marketDates = {};
+    stockAssets.forEach(a=>{ if (data.__marketDates?.[a.symbol]) marketDates[a.id]=data.__marketDates[a.symbol]; });
+    Object.defineProperty(out, "__marketDates", { value:marketDates, enumerable:false });
   } catch (e) { /* 抓不到就留空 */ }
   return out;
 }
@@ -164,7 +170,17 @@ export async function fetchLivePrices(assetList, { baseUrl } = {}) {
     fetchTWStockPrices(twStock, baseUrl),
     fetchUSStockPrices(usStock, baseUrl),
   ]);
-  return { ...fx, ...c, ...tw, ...us };
+  const merged = { ...fx, ...c, ...tw, ...us };
+  Object.defineProperty(merged, "__marketDates", {
+    value:{ ...(tw.__marketDates||{}), ...(us.__marketDates||{}) }, enumerable:false
+  });
+  return merged;
+}
+
+// 股票報價實際所屬的交易日。休市時 Yahoo／證交所可能仍回前一日收盤價，
+// 所以不能只看「有沒有價格」；定期定額必須等 marketDate >= 指定買進日才算真的開市。
+export function marketDateOf(a, livePrices = {}) {
+  return livePrices.__marketDates?.[a.id] || null;
 }
 
 // 算單一資產的台幣市值：現金 balance 是原幣金額，必須乘當時匯率。

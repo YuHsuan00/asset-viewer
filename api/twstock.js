@@ -36,12 +36,17 @@ async function queryTwse(exCh, cookie) {
   if (!r.ok) throw new Error("TWSE HTTP " + r.status);
   const data = await r.json();
   const out = {};
+  const marketDates = {};
   (data.msgArray || []).forEach(item => {
     let price = parseFloat(item.z);
     if (isNaN(price) || item.z === "-") price = parseFloat(item.y);
-    if (!isNaN(price)) out[item.c] = price;
+    if (!isNaN(price)) {
+      out[item.c] = price;
+      const rawDate = String(item.d || "");
+      if (/^\d{8}$/.test(rawDate)) marketDates[item.c] = `${rawDate.slice(0,4)}-${rawDate.slice(4,6)}-${rawDate.slice(6,8)}`;
+    }
   });
-  return out;
+  return { prices:out, marketDates };
 }
 
 // 備援來源：Yahoo Finance 也查得到台股，代號後面加 .TW（上市）或 .TWO（上櫃）就行，
@@ -49,6 +54,15 @@ async function queryTwse(exCh, cookie) {
 // 兩個來源互補，不是取代——證交所還是主要來源，Yahoo 只在證交所漏接時頂上。
 async function queryYahoo(codes) {
   const out = {};
+  const marketDates = {};
+  const dateInZone = (unixSeconds, timeZone) => {
+    if (!unixSeconds) return null;
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timeZone || "Asia/Taipei", year:"numeric", month:"2-digit", day:"2-digit"
+    }).formatToParts(new Date(unixSeconds * 1000));
+    const pick = type => parts.find(p=>p.type===type)?.value;
+    return `${pick("year")}-${pick("month")}-${pick("day")}`;
+  };
   await Promise.all(codes.map(async (code) => {
     const suffix = code.startsWith("6") ? ".TWO" : ".TW";
     try {
@@ -58,11 +72,16 @@ async function queryYahoo(codes) {
       );
       if (!r.ok) return;
       const d = await r.json();
-      const price = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
-      if (typeof price === "number" && !isNaN(price)) out[code] = price;
+      const meta = d?.chart?.result?.[0]?.meta;
+      const price = meta?.regularMarketPrice;
+      if (typeof price === "number" && !isNaN(price)) {
+        out[code] = price;
+        const marketDate = dateInZone(meta?.regularMarketTime, meta?.exchangeTimezoneName);
+        if (marketDate) marketDates[code] = marketDate;
+      }
     } catch (e) { /* 這檔還是查不到就算了，留給呼叫端用舊價格 */ }
   }));
-  return out;
+  return { prices:out, marketDates };
 }
 
 export default async function handler(req, res) {
@@ -75,15 +94,17 @@ export default async function handler(req, res) {
   const exCh = list.map(buildCh).join("|");
 
   let out = {};
+  let marketDates = {};
   try {
     const cookie = await getTwseSessionCookie();
-    out = await queryTwse(exCh, cookie);
+    ({ prices:out, marketDates } = await queryTwse(exCh, cookie));
     // 拿到的檔數比要求的少：可能是那次 session 沒生效，重試一次（帶新的 session），
     // 只有真的不齊全才會多這一次來回，平常一次就齊全的情況完全不受影響、不會變慢
     if (Object.keys(out).length < list.length) {
       const cookie2 = await getTwseSessionCookie();
-      const out2 = await queryTwse(exCh, cookie2);
-      out = { ...out, ...out2 }; // 兩次的結果合併，能查到的就算數
+      const second = await queryTwse(exCh, cookie2);
+      out = { ...out, ...second.prices }; // 兩次的結果合併，能查到的就算數
+      marketDates = { ...marketDates, ...second.marketDates };
     }
   } catch (e) { /* 證交所這條路完全失敗，交給下面 Yahoo 頂上，這裡不用直接回錯誤 */ }
 
@@ -92,7 +113,8 @@ export default async function handler(req, res) {
   if (missing.length) {
     try {
       const fromYahoo = await queryYahoo(missing);
-      out = { ...out, ...fromYahoo };
+      out = { ...out, ...fromYahoo.prices };
+      marketDates = { ...marketDates, ...fromYahoo.marketDates };
     } catch (e) { /* Yahoo 也失敗，這幾檔就留給呼叫端用舊價格頂著 */ }
   }
 
@@ -100,5 +122,6 @@ export default async function handler(req, res) {
     return res.status(502).json({ error: "抓取失敗", detail: "證交所跟 Yahoo 兩個來源都查不到資料" });
   }
   res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=60");
+  out.__marketDates = marketDates;
   return res.status(200).json(out);
 }

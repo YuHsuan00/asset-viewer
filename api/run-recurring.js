@@ -29,7 +29,29 @@ async function logAssetEvent(SUPABASE_URL, headers, assetId, assetName, type, { 
 //   SUPABASE_URL      例：https://xxxxx.supabase.co
 //   SUPABASE_ANON_KEY 例：eyJhbGci....
 
-import { fetchLivePrices, valueOfAsset, unitPriceOf, getBaseUrl, writeBackPrices } from "./live-prices.js";
+import { fetchLivePrices, valueOfAsset, unitPriceOf, marketDateOf, getBaseUrl, writeBackPrices } from "./live-prices.js";
+
+const addIsoDays = (iso, n=1) => {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate()+n);
+  return d.toISOString().slice(0,10);
+};
+const dayOfIso = iso => Number(iso.slice(8,10));
+
+// 找出「尚未處理的指定買進日」。last_run_date 記的是原指定日，不是實際順延成交日；
+// 因此週末延到週一後，仍能精確知道週六／週日各有一筆，而不會漏買或重複買。
+function pendingScheduledDates(rule, todayStr) {
+  const created = String(rule.created_at || todayStr).slice(0,10);
+  let cursor = rule.last_run_date ? addIsoDays(rule.last_run_date) : created;
+  const days = rule.days_of_month || [];
+  const out = [];
+  let safety = 0;
+  while (cursor <= todayStr && safety++ < 400) {
+    if (days.includes(dayOfIso(cursor))) out.push(cursor);
+    cursor = addIsoDays(cursor);
+  }
+  return out;
+}
 
 export default async function handler(req, res) {
   // trim() 防呆：跟 weekly-snapshot.js 一致，避免環境變數夾帶空白/換行或結尾斜線造成 404
@@ -71,14 +93,11 @@ export default async function handler(req, res) {
     const now = new Date();
     const tw = new Date(now.getTime() + 8 * 3600 * 1000);
     const todayStr = tw.toISOString().slice(0, 10); // YYYY-MM-DD
-    const todayDay = tw.getUTCDate();
-
     let executed = 0;
     const skipped = []; // 記錄被跳過的規則跟原因，回傳出來方便排查「為什麼我的定期定額沒跑」
     for (const rule of rules) {
-      const days = rule.days_of_month || [];
-      if (!days.includes(todayDay)) continue;
-      if (rule.last_run_date === todayStr) continue; // 快速跳過：明顯今天已經跑過的，省一次 API 呼叫
+      const scheduledDates = pendingScheduledDates(rule, todayStr);
+      if (!scheduledDates.length) continue;
 
       const from = assetMap[rule.from_id];
       const to = assetMap[rule.to_id];
@@ -93,66 +112,62 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // ── 原子性搶佔：用「條件式更新」讓資料庫自己保證同一天只有一個人搶得到執行權 ──
-      // 條件是「last_run_date 還不是今天（或從沒執行過）」才准許更新成今天；
-      // 搶輸的人（不管是 Cron 還是使用者開 App 補跑）會被 where 條件擋下，回傳空陣列，代表這次直接放棄不執行。
-      // 這一步要在「真的去扣款」之前做，這樣就算扣款那步網路中斷失敗，最壞情況只是「這次沒扣到」，
-      // 而不是「扣了但沒標記成功、下次又重複扣一次」。
-      const claimUrl = `${SUPABASE_URL}/rest/v1/recurring_transfers?id=eq.${encodeURIComponent(rule.id)}&or=(last_run_date.is.null,last_run_date.neq.${todayStr})`;
-      const claimRes = await fetch(claimUrl, {
-        method: "PATCH",
-        headers: { ...headers, Prefer: "return=representation" },
-        body: JSON.stringify({ last_run_date: todayStr }),
-      });
-      if (!claimRes.ok) continue; // 搶佔請求本身失敗，跳過這條規則，不做任何資產異動
-      const claimed = await claimRes.json();
-      if (!Array.isArray(claimed) || claimed.length === 0) continue; // 搶輸了（已經被搶走），放棄這次執行
+      for (const scheduledDate of scheduledDates) {
+        // 富邦規則：股票指定買進日沒開市就順延。報價日期仍停在前一交易日代表目前尚未開市，不能拿舊價成交。
+        const marketDate = (to.cat === "stock_tw" || to.cat === "stock_us") ? marketDateOf(to, livePrices) : scheduledDate;
+        if (!marketDate || marketDate < scheduledDate) {
+          skipped.push({ id:rule.id, scheduledDate, reason:`${to.cat === "stock_us" ? "美股" : "台股"}未開市，順延至下一交易日` });
+          continue;
+        }
 
-      const isWholeShare = (cat) => cat === "stock_tw" || cat === "stock_us";
-      const amountTwd = Number(rule.amount_twd);
-      // 先算目標那邊：股票只能整股（無條件捨去），現金/幣可以有小數
-      let toDelta = amountTwd / toUnitPrice;
-      if (isWholeShare(to.cat)) toDelta = Math.floor(toDelta);
-      // 用「目標實際買到的價值」反推來源要扣多少，多的零頭不扣、留在來源帳戶
-      const actualValue = toDelta * toUnitPrice;
-      let fromDelta = actualValue / fromUnitPrice;
-      if (isWholeShare(from.cat)) fromDelta = Math.floor(fromDelta);
+        // 原子性搶佔的是「原指定買進日」，不是實際順延日。
+        const claimUrl = `${SUPABASE_URL}/rest/v1/recurring_transfers?id=eq.${encodeURIComponent(rule.id)}&or=(last_run_date.is.null,last_run_date.neq.${scheduledDate})`;
+        const claimRes = await fetch(claimUrl, {
+          method: "PATCH", headers: { ...headers, Prefer: "return=representation" },
+          body: JSON.stringify({ last_run_date: scheduledDate }),
+        });
+        if (!claimRes.ok) continue;
+        const claimed = await claimRes.json();
+        if (!Array.isArray(claimed) || claimed.length === 0) continue;
+        rule.last_run_date = scheduledDate;
 
-      const fromIsCash = from.cat === "cash";
-      const toIsCash = to.cat === "cash";
-      const newFromVal = fromIsCash
-        ? Math.max(0, Number(from.balance || 0) - fromDelta)
-        : Math.max(0, +((Number(from.qty || 0) - fromDelta).toFixed(8)));
-      const newToVal = toIsCash
-        ? Number(to.balance || 0) + toDelta
-        : +((Number(to.qty || 0) + toDelta).toFixed(8));
+        const isWholeShare = (cat) => cat === "stock_tw";
+        const fromCurrency = from.cat === "cash" ? (from.currency || "TWD").toUpperCase() : null;
+        const usesSourceCurrency = rule.amount_source != null && rule.amount_currency &&
+          fromCurrency === String(rule.amount_currency).toUpperCase() && fromCurrency !== "TWD";
+        const amountTwd = usesSourceCurrency ? Number(rule.amount_source) * fromUnitPrice : Number(rule.amount_twd);
+        let toDelta = amountTwd / toUnitPrice;
+        if (isWholeShare(to.cat)) toDelta = Math.floor(toDelta);
+        const actualValue = toDelta * toUnitPrice;
+        let fromDelta = actualValue / fromUnitPrice;
+        if (isWholeShare(from.cat)) fromDelta = Math.floor(fromDelta);
 
-      const fromPatch = fromIsCash ? { balance: newFromVal } : { qty: newFromVal };
-      const toPatch = toIsCash ? { balance: newToVal } : { qty: newToVal };
+        const fromIsCash = from.cat === "cash";
+        const toIsCash = to.cat === "cash";
+        const fromPatch = fromIsCash
+          ? { balance: Math.max(0, Number(from.balance || 0) - fromDelta) }
+          : { qty: Math.max(0, +((Number(from.qty || 0) - fromDelta).toFixed(8))) };
+        const toPatch = toIsCash
+          ? { balance: Number(to.balance || 0) + toDelta }
+          : { qty: +((Number(to.qty || 0) + toDelta).toFixed(8)) };
 
-      await Promise.all([
-        fetch(`${SUPABASE_URL}/rest/v1/assets?id=eq.${encodeURIComponent(from.id)}`, { method: "PATCH", headers, body: JSON.stringify(fromPatch) }),
-        fetch(`${SUPABASE_URL}/rest/v1/assets?id=eq.${encodeURIComponent(to.id)}`, { method: "PATCH", headers, body: JSON.stringify(toPatch) }),
-      ]);
+        await Promise.all([
+          fetch(`${SUPABASE_URL}/rest/v1/assets?id=eq.${encodeURIComponent(from.id)}`, { method:"PATCH", headers, body:JSON.stringify(fromPatch) }),
+          fetch(`${SUPABASE_URL}/rest/v1/assets?id=eq.${encodeURIComponent(to.id)}`, { method:"PATCH", headers, body:JSON.stringify(toPatch) }),
+        ]);
+        Object.assign(from, fromPatch);
+        Object.assign(to, toPatch);
 
-      // 同步更新記憶體中的資產值，供下面算淨值快照用
-      Object.assign(from, fromPatch);
-      Object.assign(to, toPatch);
-
-      // 記一筆事件：來源扣款算「賣出」、目標入帳算「買進」，互相標記對方是誰——
-      // 跟前端手動轉帳的紀錄格式完全一致，之後「歷史」分頁的 B/S 標記不會分不出是手動還是自動執行的
-      await Promise.all([
-        logAssetEvent(SUPABASE_URL, headers, from.id, from.name, "sell", {
-          delta: fromDelta, valueAtTime: valueOfAsset(from, livePrices),
-          counterpartyId: to.id, counterpartyName: to.name,
-        }),
-        logAssetEvent(SUPABASE_URL, headers, to.id, to.name, "buy", {
-          delta: toDelta, valueAtTime: valueOfAsset(to, livePrices),
-          counterpartyId: from.id, counterpartyName: from.name,
-        }),
-      ]);
-
-      executed++;
+        await Promise.all([
+          logAssetEvent(SUPABASE_URL, headers, from.id, from.name, "sell", {
+            delta:fromDelta, valueAtTime:valueOfAsset(from, livePrices), counterpartyId:to.id, counterpartyName:to.name,
+          }),
+          logAssetEvent(SUPABASE_URL, headers, to.id, to.name, "buy", {
+            delta:toDelta, valueAtTime:valueOfAsset(to, livePrices), counterpartyId:from.id, counterpartyName:from.name,
+          }),
+        ]);
+        executed++;
+      }
     }
 
     if (executed > 0) {

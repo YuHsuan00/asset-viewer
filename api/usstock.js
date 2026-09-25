@@ -42,6 +42,16 @@ export default async function handler(req, res) {
 
   const list = codes.split(",").map(c => c.trim().toUpperCase()).filter(Boolean);
   const out = {};
+  const marketDates = {};
+
+  const dateInZone = (unixSeconds, timeZone) => {
+    if (!unixSeconds) return null;
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timeZone || "America/New_York", year:"numeric", month:"2-digit", day:"2-digit"
+    }).formatToParts(new Date(unixSeconds * 1000));
+    const pick = type => parts.find(p=>p.type===type)?.value;
+    return `${pick("year")}-${pick("month")}-${pick("day")}`;
+  };
 
   // ── 來源 1：Yahoo Finance（兩檔一組發送，組跟組之間錯開一點時間，同組內一檔失敗不影響其他檔） ──
   const fetchOne = async (sym) => {
@@ -53,8 +63,13 @@ export default async function handler(req, res) {
       );
       if (!r.ok) return;
       const d = await r.json();
-      const price = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
-      if (typeof price === "number" && !isNaN(price)) out[sym] = price;
+      const meta = d?.chart?.result?.[0]?.meta;
+      const price = meta?.regularMarketPrice;
+      if (typeof price === "number" && !isNaN(price)) {
+        out[sym] = price;
+        const marketDate = dateInZone(meta?.regularMarketTime, meta?.exchangeTimezoneName);
+        if (marketDate) marketDates[sym] = marketDate;
+      }
     } catch (e) { /* 逾時或失敗：這檔交給下面 Stooq 補 */ }
   };
   for (let i = 0; i < list.length; i += BATCH_SIZE) {
@@ -77,12 +92,18 @@ export default async function handler(req, res) {
           const cols = line.split(",");
           const symbol = (cols[0] || "").replace(/\.us$/i, "").toUpperCase();
           const close = parseFloat(cols[6]);
-          if (symbol && !isNaN(close)) out[symbol] = close;
+          if (symbol && !isNaN(close)) {
+            out[symbol] = close;
+            if (/^\d{4}-\d{2}-\d{2}$/.test(cols[1] || "")) marketDates[symbol] = cols[1];
+          }
         });
       }
     } catch (e) { /* Stooq 也逾時或失敗，這幾檔就留空 */ }
   }
 
   res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=60");
+  // 保留原本 symbol -> price 格式；額外帶上每檔報價實際所屬的美股交易日。
+  // 定期定額靠它判斷休市：日期還停在前一交易日就不成交，等下一次真的開市才補買。
+  out.__marketDates = marketDates;
   return res.status(200).json(out);
 }
