@@ -2907,6 +2907,7 @@ ungroupedBtn.onclick = () => {
 const STOCK_API_READY = true;
 const TWSTOCK_PROXY_URL = "/api/twstock";
 const USSTOCK_PROXY_URL = "/api/usstock";
+const CRYPTO_PROXY_URL = "/api/crypto";
 
 async function fetchCryptoPrices() {
   // 0 持有量不需要即時價，也不應該因為代號／來源失敗被算進錯誤數。
@@ -2920,7 +2921,8 @@ async function fetchCryptoPrices() {
   });
   const ids = Object.keys(idMap).join(",");
 
-  // 依序嘗試多個來源，任一成功就用（回傳 { id: twdPrice }）
+  // 依序嘗試多個來源。手機直連 CoinGecko 失敗時改走自家 Vercel 代理；
+  // 代理內部還有 Yahoo SYMBOL-USD 備援，因此不是對同一來源盲目重試。
   const sources = [
     // 1) CoinGecko 直接回台幣
     async () => {
@@ -2932,19 +2934,18 @@ async function fetchCryptoPrices() {
       if (!Object.keys(out).length) throw new Error("CoinGecko 無資料");
       return out;
     },
-    // 2) CoinGecko 回美元，再用匯率換台幣（有時 twd 被限、usd 可通）
+    // 2) 同網域 Vercel 代理：CoinGecko server-side + Yahoo Finance 備援
     async () => {
-      const [pr, fx] = await Promise.all([
-        fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(ids)}&vs_currencies=usd`),
-        fetch(`https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=twd`)
-      ]);
-      if (!pr.ok) throw new Error("CG-usd HTTP "+pr.status);
-      const d = await pr.json();
-      let usdtwd = 32; // 保底匯率
-      try { const f = await fx.json(); if (f.tether&&f.tether.twd) usdtwd = f.tether.twd; } catch(e){}
+      const symbols=[...new Set(cryptos.map(a=>(a.symbol||"").toUpperCase()).filter(Boolean))];
+      const pr=await fetch(`${CRYPTO_PROXY_URL}?symbols=${encodeURIComponent(symbols.join(","))}`);
+      if (!pr.ok) throw new Error("加密貨幣代理 HTTP "+pr.status);
+      const d=await pr.json();
       const out = {};
-      Object.keys(idMap).forEach(id => { if (d[id]&&d[id].usd) out[id]=d[id].usd*usdtwd; });
-      if (!Object.keys(out).length) throw new Error("CG-usd 無資料");
+      Object.entries(idMap).forEach(([id,list])=>{
+        const sym=(list[0]?.symbol||"").toUpperCase();
+        if (d[sym]) out[id]=d[sym];
+      });
+      if (!Object.keys(out).length) throw new Error("加密貨幣代理無資料");
       return out;
     },
   ];
