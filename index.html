@@ -404,6 +404,15 @@ function fxRateOf(cur) { return fxRates[cur] ?? 1; }
 function isWholeShareCat(cat) { return cat === "stock_tw"; }
 
 const GROUP_ORDER = ["cash","crypto","stock_tw","stock_us"];
+const categoryValue = cat => assets.filter(a=>a.cat===cat).reduce((s,a)=>s+valueOf(a),0);
+// 有值的分類維持原順序排在前面；目前總值為 0 的分類留在詳細清單尾端，方便日後重新啟用。
+function displayCategoryOrder() {
+  return [...GROUP_ORDER].sort((a,b)=>{
+    const az=categoryValue(a)<=0, bz=categoryValue(b)<=0;
+    return az===bz ? GROUP_ORDER.indexOf(a)-GROUP_ORDER.indexOf(b) : (az?1:-1);
+  });
+}
+const activeCategoryKeys = () => GROUP_ORDER.filter(cat=>categoryValue(cat)>0);
 const OTHER_COLOR = "#4b515c";
 const THRESHOLD = 0.03; // 3% 以下併入「其他」
 
@@ -1511,7 +1520,7 @@ function renderLegend() {
   const box=document.getElementById("legend");
   box.innerHTML="";
   const totalNW = netWorth();
-  GROUP_ORDER.forEach(cat=>{
+  displayCategoryOrder().forEach(cat=>{
     const list=assets.filter(a=>a.cat===cat);
     if(!list.length) return;
     const gv=list.reduce((s,a)=>s+valueOf(a),0);
@@ -1714,9 +1723,12 @@ function renderChart() {
     };
   });
 
-  // 渲染切換按鈕（總資產 + 4 個大分類），只在還沒建立過、或資產類別組成變化時重繪按鈕本身
+  // 目前總值為 0 的分類不放進前端走勢圖，避免空按鈕、空折線與查值數字佔空間；
+  // 分類本身仍保留在下方詳細清單尾端，之後一有餘額就會自動重新出現。
   const TOTAL_COLOR = "#e8eaed";
-  const seriesKeys = ["total", ...GROUP_ORDER];
+  const visibleCats = activeCategoryKeys();
+  if (chartSeries!=="total" && !visibleCats.includes(chartSeries)) chartSeries="total";
+  const seriesKeys = ["total", ...visibleCats];
   seriesRow.innerHTML = seriesKeys.map(key=>{
     const cfg = getChartSeriesConfig(key);
     const dotColor = key==="total" ? TOTAL_COLOR : cfg.color;
@@ -1744,7 +1756,7 @@ function renderChart() {
   if (showAll) {
     lines.push({ key:"total", label:"總資產", color:TOTAL_COLOR,
       series: buildWeeklySeries(history, h=>h.v), isMain:true });
-    GROUP_ORDER.forEach(cat=>{
+    visibleCats.forEach(cat=>{
       const cfg = getChartSeriesConfig(cat);
       lines.push({ key:cat, label:cfg.label, color:cfg.color,
         series: buildWeeklySeries(buildCategoryHistory(cat), cfg.histExtractor), isMain:false });
@@ -2897,7 +2909,8 @@ const TWSTOCK_PROXY_URL = "/api/twstock";
 const USSTOCK_PROXY_URL = "/api/usstock";
 
 async function fetchCryptoPrices() {
-  const cryptos = assets.filter(a => a.cat === "crypto");
+  // 0 持有量不需要即時價，也不應該因為代號／來源失敗被算進錯誤數。
+  const cryptos = assets.filter(a => a.cat === "crypto" && Number(a.qty||0)>0);
   if (!cryptos.length) return { ok:0, fail:0, err:null, failedNames:[] };
   const idMap = {};
   cryptos.forEach(a => {
@@ -2994,7 +3007,7 @@ async function fetchFxRates() {
 
 async function fetchTWStockPrices() {
   if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true, err:null, failedNames:[] };
-  const stocks = assets.filter(a => a.cat === "stock_tw");
+  const stocks = assets.filter(a => a.cat === "stock_tw" && Number(a.qty||0)>0);
   if (!stocks.length) return { ok:0, fail:0, err:null, failedNames:[] };
   const codes = stocks.map(a => a.symbol).join(",");
   let ok=0, fail=0, err=null, failedNames=[];
@@ -3022,7 +3035,7 @@ async function fetchTWStockPrices() {
 
 async function fetchUSStockPrices() {
   if (!STOCK_API_READY) return { ok:0, fail:0, skipped:true, err:null, failedNames:[] };
-  const stocks = assets.filter(a => a.cat === "stock_us");
+  const stocks = assets.filter(a => a.cat === "stock_us" && Number(a.qty||0)>0);
   if (!stocks.length) return { ok:0, fail:0, err:null, failedNames:[] };
   const codes = stocks.map(a => a.symbol).join(",");
   let ok=0, fail=0, err=null, failedNames=[];
@@ -3109,11 +3122,13 @@ async function refreshPrices(silent=false) {
       status.textContent = `價格更新於 ${hh}:${mm}`;
       status.style.color = "#5b616e";
     } else if (totalOk>0) {
-      const failedNames = [...c.failedNames, ...tw.failedNames, ...us.failedNames];
-      const namesText = failedNames.length<=3
-        ? failedNames.join("、")
-        : `${failedNames.slice(0,3).join("、")} 等${failedNames.length}項`;
-      status.textContent = `已更新 ${totalOk} 項，${totalFail} 項失敗（${namesText}）`;
+      const failedGroups = [
+        ["幣",c.failedNames], ["台股",tw.failedNames], ["美股",us.failedNames]
+      ].filter(([,names])=>names.length).map(([label,names])=>{
+        const shown=names.length<=2 ? names.join("、") : `${names.slice(0,2).join("、")}等${names.length}項`;
+        return `${label}：${shown}`;
+      });
+      status.textContent = `已更新 ${totalOk} 項，${totalFail} 項失敗（${failedGroups.join("；")}）`;
       status.style.color = "#e8804a";
     } else {
       // 全失敗：顯示原因，多半是 file:// 開啟或被限流
